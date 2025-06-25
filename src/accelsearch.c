@@ -118,7 +118,7 @@ int main(int argc, char *argv[])
     /* Generate the correlation kernels */
 
     printf("\nGenerating correlation kernels:\n");
-    subharminfs = create_subharminfos(&obs);
+    subharminfs = create_subharminfos(&obs, cmd);
     printf("Done generating kernels.\n\n");
     if (cmd->ncpus > 1) {
 #ifdef _OPENMP

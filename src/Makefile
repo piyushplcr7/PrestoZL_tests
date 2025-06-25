@@ -3,6 +3,8 @@
 
 # PRESTO=/home/kyn/presto_cuda
 # PGPLOT_DIR=/data/pgplot
+PRESTO=/home/pp/Repositories/PrestoZL_tests
+PGPLOT_DIR=/usr
 
 
 # OS type
@@ -54,7 +56,8 @@ GENCODE_FLAGS   := -arch=sm_52 \
 #modify it if necessary
 #CUDA_PATH       ?= /usr/local/cuda-5.0
 # CUDA_PATH       ?= /usr/local/cuda-12.2
-CUDA_PATH       ?= /usr/local/cuda
+#CUDA_PATH       ?= /usr/local/cuda
+CUDA_PATH       ?= /usr/local/cuda-12.6
 
 #modify it if necessary
 CUDA_INC_PATH   ?= -I $(CUDA_PATH)/include -I. -I.. -I $(CUDA_PATH)/samples/common/inc/  -I $(CUDA_PATH)/samples/common/inc/ -I$(PRESTO)/include -I$(PRESTO)/include/triton/core -I$(PRESTO)/include/triton/common -I$(PRESTO)/include/triton/backend
@@ -65,7 +68,8 @@ NVCC            ?= $(CUDA_BIN_PATH)/nvcc
 #modify it if necessary, for example, if 32-bit machine, -m32
 NVCCFLAGS 			?= -m64 -ccbin g++
 
-EXTRA_NVCCFLAGS ?= -Xcompiler -fPIC -O2
+#EXTRA_NVCCFLAGS ?= -std=c++17 -Xcompiler -fPIC -O2
+EXTRA_NVCCFLAGS ?= -std=c++17 -Xcompiler -fPIC -lineinfo
 
 #modify it if necessary, -m64 to -m32 for 32-bit machine
 LINKCOMMAND_CUDA = g++ -m64 -O2 -o	
@@ -93,11 +97,12 @@ CFITSIOLINK := $(shell pkg-config --libs cfitsio)
 PRESTOLINK = $(CFITSIOLINK) -L$(PRESTO)/lib -lpresto $(FFTLINK) $(CUDA_LINK_EXTRA_FLAGS) -L $(SYSDIR)/lib/x86_64-linux-gnu -lstdc++ -lpthread
 
 CC = gcc
+#CC = g++
 #CC = clang-3.6
 FC = gfortran
 
 # Set this to true if you want to use OpenMP.  false otherwise
-USEOPENMP = false
+USEOPENMP = true
 
 # Set this to true if you want to profile.
 USEPROFILE = false
@@ -107,12 +112,6 @@ CFLAGS = -I$(PRESTO)/include $(GLIBINC) $(CFITSIOINC) $(PGPLOTINC) $(FFTINC) $(C
 	-g -Wall -W -fPIC -O3 -ffast-math \
 	-DUSEMMAP -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
 CLINKFLAGS = $(CFLAGS) -Wl,-rpath,$(PRESTO)/lib
-
-
-CFLAGS_NVCC = -I$(PRESTO)/include $(GLIBINC) $(CFITSIOINC) $(PGPLOTINC) $(FFTINC) \
-	-O3\
-	-DUSEMMAP -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
-CLINKFLAGS_NVCC = $(CFLAGS_NVCC) -L$(PRESTO)/lib
 
 # If you are getting errors running the test code for the Python PRESTO parts
 # (tests/test_presto_python.py) try commenting the following, do a "make clean",

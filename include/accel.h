@@ -151,7 +151,7 @@ typedef struct ffdotpows_cu
 
 /* accel_utils.c */
 
-subharminfo **create_subharminfos(accelobs *obs);
+subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd);
 void free_subharminfos(accelobs *obs, subharminfo **shis);
 void create_accelobs(accelobs *obs, infodata *idata,
                      Cmdline *cmd, int usemmap);

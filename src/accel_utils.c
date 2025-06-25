@@ -196,14 +196,46 @@ kernel **gen_kernmatrix(int numz, int numw)
     return kerns;
 }
 
-static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subharminfo *shi, accelobs *obs)
+/* #include <pthread.h>
+#include "cuda_helper.h"
+#include "cuda_runtime.h"
+#include "cuda_helper.h"
+#include <nvtx3/nvToolsExt.h>
+
+// Struct to hold thread input
+typedef struct {
+    size_t size;           // Size in bytes
+    float* powers;     // Pointer to store the allocated memory
+} AllocArgs;
+
+// Thread function
+void* allocate_pinned_memory(void* arg) {
+    AllocArgs* args = (AllocArgs*)arg;
+    CUDA_CHECK(cudaSetDevice(0));
+
+    float* powers;
+    CUDA_CHECK(cudaMallocHost((void**)&powers, args->size));
+
+    args->powers = powers;
+
+    return NULL;
+} */
+
+static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subharminfo *shi, accelobs *obs)//, int proper_batch_size)
 /* Note:  'zmax' is the overall maximum 'z' in the search while
           'wmax' is the overall maximum 'w' in the search       */
 {
-    int ii, jj, fftlen;
+    /* pthread_t thread;
+    double fullrlo = obs->rlo;
+    double fullrhi = fullrlo + obs->corr_uselen * ACCEL_DR - ACCEL_DR; */
     double harm_fract;
-
     harm_fract = (double)harmnum / (double)numharm;
+    /* double drlo = rint(ACCEL_RDR * fullrlo * harm_fract) * ACCEL_DR; 
+    double drhi = rint(ACCEL_RDR * fullrhi * harm_fract) * ACCEL_DR;
+    size_t current_numrs = (int)((ceil(drhi) - floor(drlo)) * ACCEL_RDR + DBLCORRECT) + 1;
+    */
+    int ii, jj, fftlen; 
+    
     shi->numharm = numharm;
     shi->harmnum = harmnum;
     shi->zmax = calc_required_z(harm_fract, zmax);
@@ -220,6 +252,16 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
     shi->numkern_zdim = (shi->zmax / ACCEL_DZ) * 2 + 1;
     shi->numkern_wdim = (shi->wmax / ACCEL_DW) * 2 + 1;
     shi->numkern = shi->numkern_zdim * shi->numkern_wdim;
+    /* size_t current_powers_size = shi->numkern * (current_numrs + 10) * sizeof(float) * proper_batch_size;
+    // create a separate thread to do the pinned memory allocation
+    //float* powers = NULL;
+    AllocArgs args = {
+        .size = current_powers_size,
+        .powers = NULL
+    };
+
+    pthread_create(&thread, NULL, allocate_pinned_memory, &args); */
+
     /* Allocate 2D array of kernels, with dimensions being z and w */
     shi->kern = gen_kernmatrix(shi->numkern_zdim, shi->numkern_wdim);
     /* Actually append kernels to each array element */
@@ -231,18 +273,34 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
                         -shi->wmax + ii * ACCEL_DW, fftlen, &shi->kern[ii][jj]);
         }
     }
+
+    /* pthread_join(thread, NULL);
+    float* powers = args.powers;
+    if (powers == NULL) {
+        printf("Problem in allocation!\n");
+        exit(1);
+    }
+    else {
+        printf("harm fract: %d/%d allocation %f GB, %ld bytes\n", harmnum, numharm, (double)current_powers_size/ (1<<30), current_powers_size);
+    }
+    shi->powers = powers;
+     */
 }
 
-subharminfo **create_subharminfos(accelobs *obs)
+subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
 {
     double kern_ram_use = 0;
     int ii, jj, harmtosum, fftlen;
     subharminfo **shis;
 
+    // same as batch_size_max
+    int map_array_size = (int)(((double)obs->highestbin - obs->rlo) / ((double)obs->corr_uselen * ACCEL_DR)) + 1;
+    //int proper_batch_size = cmd->batchsize < map_array_size ? cmd->batchsize : map_array_size;
+
     shis = (subharminfo **)malloc(obs->numharmstages * sizeof(subharminfo *));
     /* Prep the fundamental (actually, the highest harmonic) */
     shis[0] = (subharminfo *)malloc(2 * sizeof(subharminfo));
-    init_subharminfo(1, 1, (int)obs->zhi, (int)obs->whi, &shis[0][0], obs);
+    init_subharminfo(1, 1, (int)obs->zhi, (int)obs->whi, &shis[0][0], obs); //, proper_batch_size);
     fftlen = obs->fftlen;
     kern_ram_use += shis[0][0].numkern * fftlen * sizeof(fcomplex); // in Bytes
     // if (obs->numw)
@@ -262,7 +320,7 @@ subharminfo **create_subharminfos(accelobs *obs)
             for (jj = 1; jj < harmtosum; jj += 2)
             {
                 init_subharminfo(harmtosum, jj, (int)obs->zhi,
-                                 (int)obs->whi, &shis[ii][jj - 1], obs);
+                                 (int)obs->whi, &shis[ii][jj - 1], obs); //, proper_batch_size);
                 fftlen = calc_fftlen(harmtosum, jj, (int)obs->zhi, (int)obs->whi, obs);
                 kern_ram_use += shis[ii][jj - 1].numkern * fftlen * sizeof(fcomplex); // in Bytes
                 // if (obs->numw)
