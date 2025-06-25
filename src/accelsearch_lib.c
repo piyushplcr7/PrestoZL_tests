@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <assert.h>
+#include <time.h>
 /*#undef USEMMAP*/
 
 #ifdef USEMMAP
@@ -33,6 +34,7 @@
 
 #include "cuda_runtime.h"
 #include "cuda_helper.h"
+#include <nvtx3/nvToolsExt.h>
 
 // Use OpenMP
 #ifdef _OPENMP
@@ -100,7 +102,7 @@ GSList *insert_to_cands(
 
 void sort_search_results(SearchValue *search_results, unsigned long long int search_num);
 void clear_cache();
-void subharm_fderivs_vol_cu_batch(
+size_t subharm_fderivs_vol_cu_batch(
     ffdotpows_cu *ffdot_array,
     int numharm,
     int harmnum,
@@ -113,11 +115,20 @@ void subharm_fderivs_vol_cu_batch(
     fcomplex *full_tmpout_array,
     int batch_size,
     fcomplex *fkern,
-    int inds_idx);
+    int inds_idx,
+    fcomplex* pdata_dev,
+    unsigned short* rinds_all,
+    unsigned short* zinds_all,
+    cudaEvent_t rzinds_copy_finished,
+    cudaStream_t some_stream,
+    fcomplex* pdata_all,
+    cudaEvent_t pdata_copy_finished,
+    cudaStream_t pdata_stream);
 
 void init_inds_array(int size);
 
 fcomplex *fkern_host_to_dev(subharminfo **subharminfs, int numharmstages, int **offset_array);
+fcomplex *fkern_host_to_dev_modified(subharminfo **subharminfs, int numharmstages, int **offset_array);
 void init_constant_device(int *subw_host, int subw_size, float *powcuts_host, int *numharms_host, double *numindeps_host, int numharmstages_size);
 
 extern float calc_median_powers(fcomplex *amplitudes, int numamps);
@@ -420,7 +431,7 @@ void accelsearch_CPU1(int argc, char *argv[], subharminfo ***subharminfs_ptr, ac
     /* Generate the correlation kernels */
 
     printf("\nGenerating correlation kernels:\n");
-    subharminfs = create_subharminfos(&obs);
+    subharminfs = create_subharminfos(&obs, cmd);
     *subharminfs_ptr = subharminfs;
 
     if (cmd->ncpus > 1)
@@ -472,10 +483,23 @@ void accelsearch_CPU1(int argc, char *argv[], subharminfo ***subharminfs_ptr, ac
 
 int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr, Cmdline *cmd)
 {
+    int max_threads = omp_get_max_threads();
+    printf("Max threads (inside accelsearch_gpu): %d\n", max_threads);
     int ii, rstep;
     GSList *cands = NULL;
     /* The step-size of blocks to walk through the input data */
     rstep = obs.corr_uselen * ACCEL_DR;
+    
+    // Create cuda events for timing 
+    cudaEvent_t start,stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    // timing cpu
+    struct timespec start_cpu, end_cpu;
+    double timing = 0;
+    float elapsed;
+    
     // Create cuda stream
     cudaStream_t main_stream, sub_stream;
     CUDA_CHECK(cudaStreamCreate(&main_stream));
@@ -489,10 +513,33 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     int fundamental_numzs = subharminfs[0][0].numkern_zdim;
     int fundamental_numrs = obs.corr_uselen;
     long long fundamental_size = fundamental_numrs * fundamental_numzs * fundamental_numws;
-    int *subw_host = malloc(single_loop * fundamental_numws * sizeof(int *));
+
+    double allocated_pinned_memory = 0;
+    double bytes_in_GB = (double) (1 << 30);
+
+    /* int *subw_host = malloc(single_loop * fundamental_numws * sizeof(int *));
     float *powcuts_host = (float *)malloc(obs.numharmstages * sizeof(float *));
     int *numharms_host = (int *)malloc(obs.numharmstages * sizeof(int *));
-    double *numindeps_host = (double *)malloc(obs.numharmstages * sizeof(double *));
+    double *numindeps_host = (double *)malloc(obs.numharmstages * sizeof(double *)); */
+
+    // Allocating pinned memory for transfer to GPU
+    // Can it be done in parallel?
+    int *subw_host; 
+    CUDA_CHECK(cudaMallocHost(&subw_host, single_loop * fundamental_numws * sizeof(int)));
+    allocated_pinned_memory += single_loop * fundamental_numws * sizeof(int)/ bytes_in_GB;
+
+    float *powcuts_host;
+    CUDA_CHECK(cudaMallocHost(&powcuts_host, obs.numharmstages * sizeof(float)));
+    allocated_pinned_memory += obs.numharmstages * sizeof(float)/ bytes_in_GB;
+
+    int *numharms_host;
+    CUDA_CHECK(cudaMallocHost(&numharms_host, obs.numharmstages * sizeof(int)));
+    allocated_pinned_memory += obs.numharmstages * sizeof(int)/ bytes_in_GB;
+
+    double *numindeps_host;
+    CUDA_CHECK(cudaMallocHost(&numindeps_host, obs.numharmstages * sizeof(double)));
+    allocated_pinned_memory += obs.numharmstages * sizeof(double)/ bytes_in_GB;
+
     if (obs.numharmstages > 1)
     {
         int id = 0;
@@ -519,8 +566,19 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             }
         }
     }
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+    //////////////////////// Initializing the constant memory /////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+
+    clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     // Copy to the GPU. Since it occupies less space than the GPU constant memory size, place it in the GPU constant memory
     init_constant_device(subw_host, single_loop * fundamental_numws, powcuts_host, numharms_host, numindeps_host, obs.numharmstages);
+    clock_gettime(CLOCK_MONOTONIC, &end_cpu);
+    double elapsed_cpu = (end_cpu.tv_sec - start_cpu.tv_sec) +
+                     (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
+
+    printf("init_constant_device: %.9f seconds\n", elapsed_cpu);
 
     // Saving shi->kern.data from CPU to GPU
     fcomplex *fkern_gpu; // shi->kern.data
@@ -537,16 +595,35 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         offset_array[ii] = (int *)malloc(jj * sizeof(int));
     }
 
+    printf("test\n");
+    clock_gettime(CLOCK_MONOTONIC, &start_cpu);
+    cudaEventRecord(start,0);
     fkern_gpu = fkern_host_to_dev(subharminfs, obs.numharmstages, offset_array);
+    //fkern_gpu = fkern_host_to_dev_modified(subharminfs, obs.numharmstages, offset_array);
+
+    cudaEventRecord(stop,0);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&elapsed, start, stop);
+
+    clock_gettime(CLOCK_MONOTONIC, &end_cpu);
+    elapsed_cpu = (end_cpu.tv_sec - start_cpu.tv_sec) +
+                     (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
+
+    printf("fkern host to device: %.9f seconds\n", elapsed_cpu);
+    printf("fkern host to device (CUDA Timing): %.9f seconds\n", elapsed/1000.0f);
+
     init_inds_array(single_loop);
 
     /* Start the main search loop */
     {
+        clock_gettime(CLOCK_MONOTONIC, &start_cpu);
         int max_map_size = (1 << obs.numharmstages);
         MapEntry map[max_map_size];
         double startr, lastr, nextr;
 
         int map_array_size = (int)(((double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR)) + 1;
+        printf("map_array_size = %d\n", map_array_size);
+
         for (int i = 0; i < max_map_size; i++)
         {
             map[i].value.startr_array = malloc(map_array_size * sizeof(double));
@@ -592,6 +669,13 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             startr = nextr;
         }
 
+        clock_gettime(CLOCK_MONOTONIC, &end_cpu);
+        elapsed_cpu = (end_cpu.tv_sec - start_cpu.tv_sec) +
+                        (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
+
+        printf("Creating map took: %.9f seconds\n", elapsed_cpu);
+        printf("map[0].value.count = %d\n", map[0].value.count);
+
         // Batch processing, map_size=15
         int batch_size_max = 0, ws_len_max = 0, zs_len_max = 0, fft_len_max = 0;
         subharminfo *shii = &subharminfs[0][0];
@@ -606,8 +690,26 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             ws_len_max = MAX(map[i].value.shi->numkern_wdim, ws_len_max);
             batch_size_max = MAX(map[i].value.count, batch_size_max);
         }
+        printf("batch_size_max = %d\n", batch_size_max);
         int proper_batch_size = MIN(cmd->batchsize, batch_size_max);
-        long long array_size = proper_batch_size * sizeof(fcomplex) * fft_len_max * ws_len_max * zs_len_max; // Maximum does not exceed batch_size_max
+
+    /*     //float** pinned_mem_pointers = (float**) malloc(sizeof(float*) * max_map_size);
+
+        int map_idx = 0;
+        // Allocate all pinned memory to hold powers
+        for (stage = 1; stage < obs.numharmstages; stage++)
+        {
+            harmtosum = 1 << stage;
+            for (harm = 1; harm < harmtosum; harm += 2)
+            {
+                double harm_fract = (double)harm/(double)harmtosum;
+                MapKey k = {harmtosum, harm};
+                MapEntry *map_entry = getMap(map, map_size, k);
+                //map_entry->powers = map_entry->value.shi->powers;
+            }
+        } */
+
+        size_t array_size = proper_batch_size * sizeof(fcomplex) * fft_len_max * ws_len_max * zs_len_max; // Maximum does not exceed batch_size_max
         // printf("batch_size_max:%d, fft_len_max:%d, zs_len_max:%d, ws_len_max:%d, proper_batch_size: %d, array_size: %.2fMB\n",
         //        batch_size_max,
         //        fft_len_max,
@@ -616,7 +718,13 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         //        proper_batch_size,
         //        array_size * 1.0 / 1024 / 1024);
         fcomplex *full_tmpdat_array;
-        cudaMallocAsync(&full_tmpdat_array, array_size, sub_stream); // Allocate an array of pointers on the device
+        //CUDA_CHECK(cudaMallocAsync(&full_tmpdat_array, array_size, sub_stream)); // Allocate an array of pointers on the device
+
+        // Added on the main stream as this is required on the upcoming operation on the main stream: subharm_fderivs_vol_cu. This could
+        // possibly be improved using cuda events and waiting for the event to finish using cudaStreamWaitEvent(target_stream, event, flags)
+        CUDA_CHECK(cudaMallocAsync(&full_tmpdat_array, array_size, main_stream)); // Allocate an array of pointers on the device
+
+        //fcomplex* full_tmpdat_array_cpu = malloc(array_size);
 
         SubharmonicMap *subharmonics_add;
         CUDA_CHECK(cudaMallocAsync(&subharmonics_add, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), main_stream));
@@ -635,14 +743,82 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         int *too_large = (int *)malloc(sizeof(int));
         *too_large = 0;
         int *d_too_large;
-        cudaMallocAsync(&d_too_large, sizeof(int), sub_stream);
-        cudaMemset(d_too_large, 0, sizeof(int));
-        cudaMallocAsync(&search_results_base, search_results_size, sub_stream);
+        nvtxRangePush("cuda malloc d_too_large");
+        CUDA_CHECK(cudaMallocAsync(&d_too_large, sizeof(int), sub_stream));
+        nvtxRangePop();
+        CUDA_CHECK(cudaMemset(d_too_large, 0, sizeof(int)));
+
+        nvtxRangePush("cuda malloc async search_results_base ");
+        CUDA_CHECK(cudaMallocAsync(&search_results_base, search_results_size, sub_stream));
+        nvtxRangePop();
         SearchValue *search_results = search_results_base;
 
         unsigned long long int *search_nums;
         CUDA_CHECK(cudaMalloc((void **)&search_nums, sizeof(unsigned long long int)));
         CUDA_CHECK(cudaMemsetAsync(search_nums, 0, sizeof(unsigned long long int), sub_stream));
+
+        size_t search_nums_host = 0;
+
+        // Allocating pdata_dev earlier for the maximum possible size
+        // and reusing it inside subharm_fderivs_vol_cu
+        fcomplex *pdata_dev;
+        CUDA_CHECK(cudaMallocAsync(&pdata_dev, 
+                                   (size_t)(sizeof(fcomplex) * fft_len_max * proper_batch_size), 
+                                   main_stream));
+
+        // Allocating pinned memory for rinds and zinds that will be reused
+        unsigned short* rinds_all;
+        unsigned short* zinds_all;
+        
+        int total_harmonic_fractions = 1<< (obs.numharmstages-1);
+        unsigned short* rinds_all_master[total_harmonic_fractions];
+        unsigned short* zinds_all_master[total_harmonic_fractions];
+
+        size_t size_rinds_all = sizeof(unsigned short) * obs.corr_uselen * proper_batch_size * 2 * total_harmonic_fractions;
+        CUDA_CHECK(cudaMallocHost((void **)&rinds_all, size_rinds_all));
+        printf("size rinds_all = %f GB\n", size_rinds_all / bytes_in_GB);
+        allocated_pinned_memory += size_rinds_all/bytes_in_GB;
+
+        cudaEvent_t rzinds_copy_finished_array[total_harmonic_fractions];
+        for (int i = 0 ; i < total_harmonic_fractions ; ++i) {
+            CUDA_CHECK(cudaEventCreate(&rzinds_copy_finished_array[i]));
+            rinds_all_master[i] = rinds_all + i * obs.corr_uselen * proper_batch_size * 2;
+        }
+        //exit(1);
+
+        cudaEvent_t fasb_start, fasb_end;
+        CUDA_CHECK(cudaEventCreate(&fasb_start));
+        CUDA_CHECK(cudaEventCreate(&fasb_end));
+        // TODO: destroy event and stream!
+        cudaEvent_t rzinds_copy_finished;
+        CUDA_CHECK(cudaEventCreate(&rzinds_copy_finished));
+        cudaStream_t some_stream;
+        CUDA_CHECK(cudaStreamCreate(&some_stream));
+
+        fcomplex* pdata_all;
+        CUDA_CHECK(cudaMallocHost((void **)&pdata_all, 
+                                (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size));
+        allocated_pinned_memory += (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size/bytes_in_GB;
+
+        //float* pinned_powers_buffer;
+        size_t pinned_powers_max_size = (size_t)sizeof(float) * fft_len_max * subharminfs[0][0].numkern * proper_batch_size;
+
+        printf("Allocated pinned memory: %f GB\n", allocated_pinned_memory);
+
+        size_t pdata_all_size = (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size;
+        printf("size of pdata_all = %f (KB)\n", (double)pdata_all_size/1024);
+
+        float* fused_powers_buffer = malloc(pinned_powers_max_size);
+
+        printf("Pinned powers max size = %ld bytes or %f GB\n", pinned_powers_max_size, (double)pinned_powers_max_size/bytes_in_GB);
+
+        double powers_size = 0;
+
+        // TODO: destroy event and stream!
+        cudaEvent_t pdata_copy_finished;
+        CUDA_CHECK(cudaEventCreate(&pdata_copy_finished));
+        cudaStream_t pdata_stream;
+
 
         /* Reset indices if needed and search for real */
         if (obs.numharmstages > 1)
@@ -654,18 +830,23 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             int current_batch = -1;
             long long *fundamental_rlos = (long long *)malloc(batch_size * sizeof(long long *));
             SearchValue *search_results_host;
+            SearchValue *search_results_cpu;
+            // In the original code, search_results_host is allocated later on. Pre allocating it here
+            search_results_cpu = (SearchValue*) malloc(sizeof(SearchValue) * max_searchnum * 5);
             long long total_search_num = 0;
             long long search_results_host_size = 0;
-
+            //printf("batch_size = %d\n", batch_size);
             for (int j = 0; j < batch_size; j += proper_batch_size)
             {
                 current_batch++;
                 int current_batch_size = proper_batch_size < batch_size - j ? proper_batch_size : batch_size - j;
+                //zinds_all = rinds_all + obs.corr_uselen * current_batch_size;
+                //printf("j = %d; current batch size: %d, current batch no = %d\n", j, current_batch_size, current_batch);
                 ffdotpows_cu *fundamentals = malloc(current_batch_size * sizeof(ffdotpows_cu));
                 double *startr_array = map[0].value.startr_array;
                 double *lastr_array = map[0].value.lastr_array;
 
-                subharm_fderivs_vol_cu_batch(
+                size_t powers_len_fund = subharm_fderivs_vol_cu_batch(
                     fundamentals,
                     1,
                     1,
@@ -678,13 +859,30 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     full_tmpdat_array,
                     current_batch_size,
                     fkern_gpu,
-                    0);
+                    0,
+                    pdata_dev,
+                    NULL,
+                    NULL,
+                    rzinds_copy_finished,
+                    &some_stream,
+                    pdata_all,
+                    pdata_copy_finished,
+                    pdata_stream);
+
+                /* if (j == 0) {
+                    powers_size += powers_len_fund * sizeof(float) / bytes_in_GB;
+                    printf("fund powers size = %f GB\n", powers_len_fund * sizeof(float)/bytes_in_GB);
+                } */
+                // Copy powers to the pinned buffer
+                //CUDA_CHECK(cudaMemcpyAsync(subharminfs[0][0].powers, fundamentals->powers, powers_len_fund * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
+                // Assign some event to the finish of the above copy
 
                 for (int ib = 0; ib < current_batch_size; ib++)
                 {
                     fundamental_rlos[j + ib] = fundamentals[ib].rlo;
                 }
 
+                // Going over the sub harmonics
                 int kk = 0, num_expand = 0;
                 for (stage = 1; stage < obs.numharmstages; stage++)
                 {
@@ -692,6 +890,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     num_expand += harmtosum / 2;
                     for (harm = 1; harm < harmtosum; harm += 2)
                     {
+                        //printf("current batch size: %d, harm fract = %d/%d\n", current_batch_size ,harm, harmtosum);
                         // prepare batch
                         MapKey k = {harmtosum, harm};
                         MapEntry *map_entry = getMap(map, map_size, k);
@@ -709,7 +908,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         int harmtosum_local = map_entry[0].key.harmtosum;
                         int harm_local = map_entry[0].key.harm;
 
-                        subharm_fderivs_vol_cu_batch(
+                        zinds_all_master[kk] = rinds_all_master[kk] + obs.corr_uselen * current_batch_size;
+                        size_t powers_len_subharm = subharm_fderivs_vol_cu_batch(
                             subharmonics_batch,
                             harmtosum_local,
                             harm_local,
@@ -722,51 +922,262 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                             full_tmpdat_array,
                             current_batch_size,
                             fkern_gpu + offset_array[stage][harm - 1],
-                            kk);
+                            kk,
+                            pdata_dev,
+                            rinds_all_master[kk],
+                            zinds_all_master[kk],
+                            rzinds_copy_finished_array[kk],
+                            some_stream,
+                            pdata_all,
+                            pdata_copy_finished,
+                            pdata_stream);
+
+                        /* if (j == 0) {
+                            powers_size += powers_len_subharm * sizeof(float) / bytes_in_GB;
+                            printf("subharm %d/%d powers size = %f GB\n", harm, harmtosum, powers_len_subharm * sizeof(float)/bytes_in_GB);
+                        } */
+
+                        // Copy powers to the pinned buffer
+                        //CUDA_CHECK(cudaMemcpyAsync(shi_local->powers, subharmonics_batch->powers, powers_len_subharm * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
+                        //CUDA_CHECK(cudaMemcpyAsync(subharminfs[stage][harm-1].powers, subharmonics_batch[0].powers, powers_len_subharm * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
 
                         for (int i = 0; i < current_batch_size; i++)
                         {
+                            /* if (harm == 7 && harmtosum == 8) {
+                                printf("kk = %d, subharmonics_batch no = %d, numrs = %d, numzs = %d\n", kk, i, subharmonics_batch[i].numrs, subharmonics_batch[i].numzs);
+                            } */
                             subharmonics_add_host[kk * current_batch_size + i].harm_fract = kk;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numrs = subharmonics_batch[i].numrs;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numzs = subharmonics_batch[i].numzs;
+                            //subharmonics_add_host[kk * current_batch_size + i].subharmonic_numws = subharmonics_batch[i].numws;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_powers = subharmonics_batch[i].powers;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_rinds = subharmonics_batch[i].rinds;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_zinds = subharmonics_batch[i].zinds;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_wlo = subharmonics_batch[i].wlo;
                         }
                         kk++;
-                        free(subharmonics_batch);
+                    } // end loop odd fraction in a stage
+                } // end loop harmonic stages
+
+                /* if (j == 0) {
+                    printf("powers size (fund + subharmonics) = %f GB\n", powers_size);
+                } */
+
+                nvtxRangePush("memcpy subharmonics_add (H2D)");
+                CUDA_CHECK(cudaMemcpyAsync(subharmonics_add, subharmonics_add_host, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), cudaMemcpyHostToDevice, main_stream));
+                nvtxRangePop();
+
+                nvtxRangePush("some_stream synchronize");
+                CUDA_CHECK(cudaStreamSynchronize(some_stream));
+                nvtxRangePop();
+                // sync added because variables used are allocated on the sub_stream.
+
+                nvtxRangePush("sub_stream synchronize");
+                CUDA_CHECK(cudaStreamSynchronize(sub_stream));
+                nvtxRangePop();
+
+                //CUDA_CHECK(cudaEventRecord(fasb_start, main_stream));
+                fuse_add_search_batch(fundamentals, 
+                                      subharmonics_add, 
+                                      (obs.numharmstages - 1), 
+                                      current_batch_size, 
+                                      main_stream, 
+                                      search_results, 
+                                      search_nums, 
+                                      (long long)(current_batch * single_batch_size), 
+                                      proper_batch_size, 
+                                      max_searchnum, 
+                                      d_too_large);
+                /* CUDA_CHECK(cudaEventRecord(fasb_end, main_stream));
+                CUDA_CHECK(cudaEventSynchronize(fasb_end));
+
+                float time_fasb;
+                CUDA_CHECK(cudaEventElapsedTime(&time_fasb, fasb_start, fasb_end));
+                time_fasb /= 1e3; */
+
+                // copy results to host
+                nvtxRangePush("main_stream synchronize");
+                CUDA_CHECK(cudaStreamSynchronize(main_stream));
+                nvtxRangePop();
+                
+                //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                /* struct timespec fasb_cpu_start, fasb_cpu_end;
+                clock_gettime(CLOCK_MONOTONIC, &fasb_cpu_start);
+
+                printf("Doing fuse add search on CPU for batch no. %d\n", current_batch);
+                // Doing fuse_add_search on CPU
+                size_t pre_size = (size_t)current_batch * single_batch_size;
+                // Going over the fundamental powers
+                ffdotpows_cu* fundamental = &fundamentals[0];
+                long long fundamental_size = fundamental->numws * fundamental->numzs * fundamental->numrs;
+                
+                int stage_var = 0;    
+                int stages_var = obs.numharmstages - 1;
+                // Follow the indexing as in the fuse_add_search_batch kernel
+                float* fund_powers[current_batch_size];
+                float* fused_powers[current_batch_size]; 
+                for (int b = 0 ; b < current_batch_size ; ++b) {
+                    fund_powers[b] = &(subharminfs[0][0].powers[b * fundamental_size]);
+                    fused_powers[b] = &fused_powers_buffer[b*fundamental_size];
+                }
+
+                // Elements of the batch
+                #pragma omp parallel for collapse(3)
+                for (int b = 0 ; b < current_batch_size ; ++b) {
+                    for (int ii = 0 ; ii < fundamental->numws ; ++ii) {
+                        for (int jj = 0 ; jj < fundamental->numzs ; ++jj) {
+                            for (int kk = 0 ; kk < fundamental->numrs ; ++kk) {
+                                //printf("ii, jj, kk = %d, %d, %d\n", ii, jj, kk);
+                                size_t local_index = matrix_3d_index(ii, jj, kk, fundamental->numzs, fundamental->numrs);
+                                float tmp = fund_powers[b][local_index];
+                                // Simply storing the power from the fundamental
+                                fused_powers[b][local_index] = tmp;
+
+                                
+                                if (tmp > powcuts_host[stage_var]) {
+                                    printf("adding to search results on CPU!\n");
+                                    float sig = candidate_sigma(tmp, numharms_host[stage_var], numindeps_host[stage_var]);
+
+                                    if (search_nums_host+1 >= max_searchnum) {
+                                        // exit the program safely!
+                                        printf("Exiting the program in the cpu search!\n");
+                                        exit(1);
+                                    }
+                                    
+                                    #pragma omp critical
+                                    {
+                                        search_nums_host++;
+                                        // Update the search results
+                                        search_results_cpu[search_nums_host-1].index = (long long)(pre_size) + (long long)(stage_var * fundamental_size + b * (stages_var + 1) * fundamental_size + local_index);
+                                        search_results_cpu[search_nums_host-1].pow = tmp;
+                                        search_results_cpu[search_nums_host-1].sig = sig;
+                                    }
+                                }
+                                
+                            }
+                        }
                     }
                 }
 
-                CUDA_CHECK(cudaMemcpyAsync(subharmonics_add, subharmonics_add_host, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), cudaMemcpyHostToDevice, main_stream));
-                fuse_add_search_batch(fundamentals, subharmonics_add, (obs.numharmstages - 1), current_batch_size, main_stream, search_results, search_nums, (long long)(current_batch * single_batch_size), proper_batch_size, max_searchnum, d_too_large);
+                printf("fundamental powers searched\n");
+                printf("Searched %d after fundamental\n", search_nums_host);
+                //printf("CHECK: fundamental numzs, numrs = %d, %d; obs numzs, numrs = %d, %d\n", fundamental->numzs, fundamental->numrs, obs.numz, obs.corr_uselen);
 
-                // copy results to host
-                cudaStreamSynchronize(main_stream);
+                int harmfract_idx = 0;
+                // Adding power from the harmonic fractions and searching
+                for (stage_var = 1; stage_var <= stages_var; stage_var++)
+                {
+            
+                    for (int harmnum = 1; harmnum < (1<<stage_var); harmnum += 2)
+                    {
+
+                        // harmnum/2 converts the odd fraction numerator to a linear index up to 1<< (stage_var-1)
+                        // Array that contains info for the whole batch at a particular harmonic fraction
+                        SubharmonicMap* subh_fract_host_array = &subharmonics_add_host[harmfract_idx *current_batch_size];
+
+                        float* subharmonic_powers_b = subharminfs[stage_var][harmnum-1].powers;
+
+                        for (int b = 0 ; b < current_batch_size ; ++b) {
+                            // Extract the subharmonic info about the current batch element
+                            SubharmonicMap subh_host = subh_fract_host_array[b];
+
+                            //maxcheck = 0;
+
+                            // Get corresponding fused powers buffer
+                            float* fused_powers_b = &fused_powers_buffer[b*fundamental_size];
+
+                            unsigned short* subharmonic_rinds = rinds_all_master[harmfract_idx] + b * obs.corr_uselen;
+                            unsigned short* subharmonic_zinds = zinds_all_master[harmfract_idx] + b * obs.corr_uselen;
+
+                            size_t current_powers_size = subh_host.subharmonic_numzs * subh_host.subharmonic_numrs * subharminfs[stage_var][harmnum-1].numkern_wdim;
+                            
+                            #pragma omp parallel for collapse(2)
+                            for (int ii = 0 ; ii < fundamental->numws ; ++ii) {
+                                for (int jj = 0 ; jj < fundamental->numzs ; ++jj) {
+                                    for (int kk = 0 ; kk < fundamental->numrs ; ++kk) { 
+                                        // The index for the fused powers!
+                                        size_t fund_idx_loc = matrix_3d_index(ii, jj, kk, fundamental->numzs, fundamental->numrs);
+
+                                        int subw = subw_host[subh_host.harm_fract * fundamental->numws + ii];
+                                        int wind = ((subw - subh_host.subharmonic_wlo) / ACCEL_DW);
+                                        int zind = subharmonic_zinds[jj];
+                                        int rind = subharmonic_rinds[kk];
+                                        int subh_idx_loc = matrix_3d_index(wind, zind, rind, subh_host.subharmonic_numzs, subh_host.subharmonic_numrs);
+				
+                                        // Adding subharmonic power to  the fused powers buffer
+                                        fused_powers_b[fund_idx_loc] += subharmonic_powers_b[subh_idx_loc];
+        
+                                        if (fused_powers_b[fund_idx_loc] > powcuts_host[stage_var]) {
+                                            float sig = candidate_sigma(fused_powers_b[fund_idx_loc], numharms_host[stage_var], numindeps_host[stage_var]);
+
+                                            if (search_nums_host+1 >= max_searchnum) {
+                                                // exit the program safely!
+                                                exit(1);
+                                            }
+                                            
+                                            #pragma omp critical
+                                            {
+                                                search_nums_host++;
+                                                // Update the search results
+                                                search_results_cpu[search_nums_host-1].index = (long long)(pre_size) + (long long)(stage_var * fundamental_size + b * (stages_var + 1) * fundamental_size + fund_idx_loc);
+                                                search_results_cpu[search_nums_host-1].pow = fused_powers_b[fund_idx_loc];
+                                                search_results_cpu[search_nums_host-1].sig = sig;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            subharmonic_powers_b += current_powers_size; 
+                        } // Loop over elements of batch
+
+                        harmfract_idx++;
+                    } // End loop over harmonic numerator (odd no.s)
+                } // End loop over harmonic stages
+
+                printf("all subharmonics powers searched\n");
+
+                clock_gettime(CLOCK_MONOTONIC, &fasb_cpu_end);
+                double time_fasb_cpu = (fasb_cpu_end.tv_sec - fasb_cpu_start.tv_sec) + (fasb_cpu_end.tv_nsec - fasb_cpu_start.tv_nsec) / 1e9;
+                printf("FASB TIME COMPARISON: GPU: %f, CPU: %f\n", time_fasb, time_fasb_cpu); */
+                /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                    
+                
+                //printf("synchronized!\n");
                 cudaMemcpy(too_large, d_too_large, sizeof(int), cudaMemcpyDeviceToHost);
+                    
+                // If too large, free memory and exit
                 if (too_large[0])
                 {
+                    // happening probably because of the size issue! with fftlen!
+                    printf("too large exit\n");
                     free_subharmonic_cu_batch(subharmonics_add_host, current_batch_size, num_expand, sub_stream);
                     free_ffdotpows_cu_batch(fundamentals, current_batch_size, sub_stream);
-                    cudaFreeAsync(full_tmpdat_array, sub_stream);
-                    cudaFreeAsync(search_results, sub_stream);
-                    cudaFreeAsync(subharmonics_add, sub_stream);
-                    cudaFreeAsync(search_nums, sub_stream);
-                    cudaFreeAsync(d_too_large, sub_stream);
+                    CUDA_CHECK(cudaFreeAsync(full_tmpdat_array, sub_stream));
+                    CUDA_CHECK(cudaFreeAsync(search_results, sub_stream));
+                    CUDA_CHECK(cudaFreeAsync(subharmonics_add, sub_stream));
+                    CUDA_CHECK(cudaFreeAsync(search_nums, sub_stream));
+                    CUDA_CHECK(cudaFreeAsync(d_too_large, sub_stream));
+                    CUDA_CHECK(cudaFreeAsync(pdata_dev, sub_stream));
                     // clean cufftPlan
                     clear_cache();
                     cudaFree(fkern_gpu);
                     CUDA_CHECK(cudaStreamDestroy(main_stream));
                     CUDA_CHECK(cudaStreamDestroy(sub_stream));
 
+                    //CUDA_CHECK(cudaFreeHost(subharminfs[0][0].powers));
+                    // free pinnned powers arrays 
+                    /* for (int map_idx = 0 ; map_idx < map_size ; ++map_idx ) {
+                        CUDA_CHECK(cudaFreeHost(map[map_idx].powers));
+                    } */
                     freeMap(map, &max_map_size);
+
                     free(subharmonics_add_host);
                     free(fundamental_rlos);
-                    free(subw_host);
-                    free(powcuts_host);
-                    free(numharms_host);
-                    free(numindeps_host);
+                    /* cudaFreeHost(subw_host);
+                    cudaFreeHost(powcuts_host);
+                    cudaFreeHost(numharms_host);
+                    cudaFreeHost(numindeps_host); */
                     free(offset_array[0]);
                     for (ii = 1; ii < obs.numharmstages; ii++)
                     {
@@ -778,11 +1189,21 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     subharminfs = NULL;
                     *cands_ptr = NULL;
                     free(too_large);
+                    CUDA_CHECK(cudaFreeHost(rinds_all));
+                    CUDA_CHECK(cudaFreeHost(pdata_all));
+                    free(fused_powers_buffer);
+                    CUDA_CHECK(cudaFreeHost(subw_host));
+                    CUDA_CHECK(cudaFreeHost(powcuts_host));
+                    CUDA_CHECK(cudaFreeHost(numharms_host));
+                    CUDA_CHECK(cudaFreeHost(numindeps_host));
                     return 1;
                 }
 
                 unsigned long long int *search_nums_current = (unsigned long long int *)malloc(sizeof(unsigned long long int));
-                CUDA_CHECK(cudaMemcpyAsync(search_nums_current, search_nums, sizeof(unsigned long long int), cudaMemcpyDeviceToHost, main_stream));
+                CUDA_CHECK(cudaMemcpy(search_nums_current, search_nums, sizeof(unsigned long long int), cudaMemcpyDeviceToHost));
+
+                //printf("Search nums current GPU = %ld\n", search_nums_current[0]);
+                //printf("Search nums cpu = %ld\n", search_nums_host);
                 unsigned long long int search_num = search_nums_current[0];
                 if (search_num > search_num_array * search_num_base * single_search_size / (sizeof(SearchValue) * 2))
                 {
@@ -794,14 +1215,18 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         search_results_host_size = search_num_array * search_num_base * single_search_size;
                         search_results_host = (SearchValue *)malloc(search_results_host_size);
                         cudaStreamSynchronize(main_stream);
+                        nvtxRangePush("Copy search_results(D2H) ");
                         CUDA_CHECK(cudaMemcpy(search_results_host, search_results, search_num * sizeof(SearchValue), cudaMemcpyDeviceToHost));
+                        nvtxRangePop();
                         total_search_num = search_num;
                         CUDA_CHECK(cudaMemsetAsync(search_nums, 0, sizeof(unsigned long long int), sub_stream));
                     }
                     else if ((search_num + total_search_num) * sizeof(SearchValue) < search_results_host_size) // Previously allocated memory for search_results_host is sufficient
                     {
                         cudaStreamSynchronize(main_stream);
+                        nvtxRangePush("Copy search_results(D2H) ");
                         CUDA_CHECK(cudaMemcpy(search_results_host + total_search_num, search_results, search_num * sizeof(SearchValue), cudaMemcpyDeviceToHost));
+                        nvtxRangePop();
                         total_search_num += search_num;
                         CUDA_CHECK(cudaMemsetAsync(search_nums, 0, sizeof(unsigned long long int), sub_stream));
                     }
@@ -815,7 +1240,9 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         memcpy(search_results_host_append, search_results_host, total_search_num * sizeof(SearchValue));
                         // 3. Transfer search_num elements from GPU to the new memory
                         cudaStreamSynchronize(main_stream);
+                        nvtxRangePush("Copy search_results(D2H) ");
                         CUDA_CHECK(cudaMemcpy(search_results_host_append + total_search_num, search_results, search_num * sizeof(SearchValue), cudaMemcpyDeviceToHost));
+                        nvtxRangePop();
                         // 4. Free the old memory
                         free(search_results_host);
                         // 5. Update the pointer
@@ -827,7 +1254,28 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                 }
                 free_subharmonic_cu_batch(subharmonics_add_host, current_batch_size, num_expand, sub_stream);
                 free_ffdotpows_cu_batch(fundamentals, current_batch_size, sub_stream);
-            }
+
+                // Early exit to check things for first batch only
+                //exit(1);
+            } // end loop over batches, ie all batches are finished here
+
+            // Free the pinned memory for rinds and zinds
+            CUDA_CHECK(cudaFreeHost(rinds_all));
+            CUDA_CHECK(cudaFreeHost(pdata_all));
+
+            //CUDA_CHECK(cudaFreeHost(subharminfs[0][0].powers));
+            // free pinnned powers arrays 
+            /* for (int map_idx = 0 ; map_idx < map_size ; ++map_idx ) {
+                printf("freeing the powers at idx = %d\n", map_idx);
+                float* powers_to_free = map[map_idx].powers;
+                if (powers_to_free == NULL) {
+                    printf("Pointer NULL for some reason!?\n");
+                    exit(1);
+                }
+                CUDA_CHECK(cudaFreeHost(map[map_idx].powers));
+            } */
+            free(fused_powers_buffer);
+            
             cudaStreamSynchronize(main_stream);
             unsigned long long int *search_nums_host = (unsigned long long int *)malloc(sizeof(unsigned long long int));
             CUDA_CHECK(cudaMemcpy(search_nums_host, search_nums, sizeof(unsigned long long int), cudaMemcpyDeviceToHost));
@@ -838,9 +1286,9 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                 sort_search_results(search_results, search_num);
                 if (total_search_num == 0) // search_results_host memory has not been allocated yet
                 {
-                search_results_host = (SearchValue *)malloc(search_num * sizeof(SearchValue));
-                CUDA_CHECK(cudaMemcpy(search_results_host, search_results, search_num * sizeof(SearchValue), cudaMemcpyDeviceToHost));
-                total_search_num = search_num;
+                    search_results_host = (SearchValue *)malloc(search_num * sizeof(SearchValue));
+                    CUDA_CHECK(cudaMemcpy(search_results_host, search_results, search_num * sizeof(SearchValue), cudaMemcpyDeviceToHost));
+                    total_search_num = search_num;
                 }
                 else if ((search_num + total_search_num) * sizeof(SearchValue) < search_results_host_size) // Previously allocated memory for search_results_host is sufficient
                 {
@@ -864,14 +1312,19 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     total_search_num += search_num;
                 }
             }
-            cudaFreeAsync(full_tmpdat_array, sub_stream);
-            cudaFreeAsync(search_results, sub_stream);
-            cudaFreeAsync(subharmonics_add, sub_stream);
-            cudaFreeAsync(search_nums, sub_stream);
-            cudaFreeAsync(d_too_large, sub_stream);
+            CUDA_CHECK(cudaFreeAsync(full_tmpdat_array, sub_stream));
+            CUDA_CHECK(cudaFreeAsync(search_results, sub_stream));
+            CUDA_CHECK(cudaFreeAsync(subharmonics_add, sub_stream));
+            CUDA_CHECK(cudaFreeAsync(search_nums, sub_stream));
+            CUDA_CHECK(cudaFreeAsync(d_too_large, sub_stream));
+            CUDA_CHECK(cudaFreeAsync(pdata_dev, sub_stream));
+            CUDA_CHECK(cudaFreeHost(subw_host));
+            CUDA_CHECK(cudaFreeHost(powcuts_host));
+            CUDA_CHECK(cudaFreeHost(numharms_host));
+            CUDA_CHECK(cudaFreeHost(numindeps_host));
             // clean cufftPlan
             clear_cache();
-            cudaFree(fkern_gpu);
+            CUDA_CHECK(cudaFree(fkern_gpu));
             CUDA_CHECK(cudaStreamDestroy(main_stream));
             CUDA_CHECK(cudaStreamDestroy(sub_stream));
 
@@ -880,10 +1333,10 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             freeMap(map, &max_map_size);
             free(subharmonics_add_host);
             free(fundamental_rlos);
-            free(subw_host);
-            free(powcuts_host);
-            free(numharms_host);
-            free(numindeps_host);
+            //CUDA_CHECK(cudaFreeHost(subw_host));
+            //CUDA_CHECK(cudaFreeHost(powcuts_host));
+            //CUDA_CHECK(cudaFreeHost(numharms_host));
+            //CUDA_CHECK(cudaFreeHost(numindeps_host));
             free(offset_array[0]);
             for (ii = 1; ii < obs.numharmstages; ii++)
             {
