@@ -3,6 +3,12 @@
 double extended_equiv_gaussian_sigma(double logp);
 double log_asymtotic_incomplete_gamma(double a, double z);
 double log_asymtotic_gamma(double z);
+void cdfnor(int *which, double *p, double *q, double *x, double *mean,
+    double *sd, int *status, double *bound);
+void cdfchi2(int *which, double *p, double *q, double *x, double *df,
+    int *status, double *bound);
+void cdfnor2(int *which, double *p, double *q, double *x, double *mean,
+    double *sd, int *status, double *bound);
 
 float get_numphotons(FILE *file)
 /* Return the total number of photons in the FFT file      */
