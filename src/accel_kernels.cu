@@ -58,7 +58,7 @@ typedef struct
 
 extern "C" extern float ***gen_f3Darr_cu(long nhgts, long nrows, long ncols, cudaStream_t stream);
 
-extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream);
+extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
 
 extern "C" extern void fuse_add_search_batch(ffdotpows_cu *fundamentals, SubharmonicMap *subhmap, int stages, int fundamental_num, cudaStream_t stream, SearchValue *search_results, unsigned long long int *search_nums, long long pre_size, int proper_batch_size, int max_searchnum, int *too_large);
 
