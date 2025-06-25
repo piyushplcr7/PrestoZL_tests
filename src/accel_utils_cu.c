@@ -1051,18 +1051,21 @@ size_t subharm_fderivs_vol_cu_batch(
     } */
 
     // Creating a texture object to handle the FFT data
-    struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+    //struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+
+    // For float4
+    struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
     cudaArray_t cuArray;
     // 2 * fftlen is the width, batch_size is the height
-    CUDA_CHECK(cudaMallocArray(&cuArray, &channelDesc, 2 * fftlen, batch_size, cudaArrayDefault));
+    CUDA_CHECK(cudaMallocArray(&cuArray, &channelDesc, fftlen/2 , batch_size, cudaArrayDefault));
     CUDA_CHECK(cudaMemcpy2DToArrayAsync(cuArray,
-                        0, 0,
-                        pdata_dev,
-                        2 * fftlen * sizeof(float),
-                        2 * fftlen * sizeof(float),
-                        batch_size,
-                        cudaMemcpyDeviceToDevice,
-                        stream));
+        0, 0,
+        pdata_dev,
+        (fftlen / 2) * sizeof(float4),  // pitch in bytes
+        (fftlen / 2) * sizeof(float4),  // width in bytes
+        batch_size,
+        cudaMemcpyDeviceToDevice,
+        stream));
 
     struct cudaResourceDesc resDesc;
     memset(&resDesc, 0, sizeof(resDesc));
