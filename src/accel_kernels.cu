@@ -30,6 +30,7 @@
 #include "cufft.h"
 #include "cuda_helper.h"
 #include <math.h>
+#include <nvtx3/nvToolsExt.h>
 
 __constant__ int subw_device[12006];
 __constant__ float powcuts_device[6];
@@ -1201,11 +1202,15 @@ void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharmi
 	// 2. run pre_fft_kernel
 	int threads_pre = 512; // Equal to B in my notes
 	// Shared memory size in KB
-	const int shared_mem_size = 64;
+	const int shared_mem_size = 32;
 	int alpha = 32 * shared_mem_size/threads_pre;
 	int beta = (batch_size + alpha - 1)/ alpha;
 
 	if (batch_size % alpha == 0) {
+		cudaFuncSetAttribute(
+			pre_fft_kernel_batch_float4_modified<shared_mem_size>,
+			cudaFuncAttributeMaxDynamicSharedMemorySize,
+			1024 * shared_mem_size); 
 		int zs_len_reduced = (zs_len_global + alpha - 1)/alpha;
 
 		dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen/2 + threads_pre - 1) / threads_pre);
