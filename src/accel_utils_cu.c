@@ -29,7 +29,7 @@
 #define NEAREST_INT(x) (int)(x < 0 ? x - 0.5 : x + 0.5)
 
 void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
-    fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
+    fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj, cudaTextureObject_t texObjKern);
 
 unsigned short **inds_array;
 
@@ -1052,6 +1052,9 @@ size_t subharm_fderivs_vol_cu_batch(
 
     // Creating a texture object to handle the FFT data
     //struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+    
+    assert(((uintptr_t)pdata_dev % 16) == 0);
+    assert(((uintptr_t)fkern % 16) == 0);
 
     // For float4
     struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
@@ -1082,8 +1085,41 @@ size_t subharm_fderivs_vol_cu_batch(
     texDesc.readMode       = cudaReadModeElementType;
     texDesc.normalizedCoords = 0;
 
-    cudaTextureObject_t texObj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL));
+    cudaTextureObject_t texObjFFTs = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&texObjFFTs, &resDesc, &texDesc, NULL));
+
+    // texture object for kernels
+    // Same descriptor as ffts
+    struct cudaChannelFormatDesc channelDescKern = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
+    cudaArray_t cuArrayKern;
+    // fftlen/2 is the width in float4s, height is the number of kernels (numws * numzs)
+    CUDA_CHECK(cudaMallocArray(&cuArrayKern, &channelDescKern, fftlen/2 , ffdot_array[0].numws * ffdot_array[0].numzs, cudaArrayDefault));
+    CUDA_CHECK(cudaMemcpy2DToArrayAsync(cuArrayKern,
+        0, 0,
+        fkern,
+        (fftlen / 2) * sizeof(float4),  // pitch in bytes
+        (fftlen / 2) * sizeof(float4),  // width in bytes
+        ffdot_array[0].numws * ffdot_array[0].numzs,
+        cudaMemcpyDeviceToDevice,
+        stream));
+
+    struct cudaResourceDesc resDescKern;
+    memset(&resDescKern, 0, sizeof(resDescKern));
+
+    resDescKern.resType = cudaResourceTypeArray;
+    resDescKern.res.array.array = cuArrayKern;
+
+    struct cudaTextureDesc texDescKern;
+    memset(&texDescKern, 0, sizeof(texDescKern));
+
+    texDescKern.addressMode[0] = cudaAddressModeClamp;
+    texDescKern.addressMode[1] = cudaAddressModeClamp;
+    texDescKern.filterMode     = cudaFilterModePoint;  // no interpolation
+    texDescKern.readMode       = cudaReadModeElementType;
+    texDescKern.normalizedCoords = 0;
+
+    cudaTextureObject_t texObjKern = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&texObjKern, &resDescKern, &texDescKern, NULL));
 
     free(rinds);
     free(zinds);    
@@ -1139,12 +1175,15 @@ size_t subharm_fderivs_vol_cu_batch(
     #ifdef PINNED_PDATA_ALL
     CUDA_CHECK(cudaStreamWaitEvent(stream, pdata_copy_finished, 0));
     #endif
-    do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream, texObj);
+    do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream, texObjFFTs, texObjKern);
     //CUDA_CHECK(cudaFreeAsync(pdata_dev, stream));
     
     // Destroy the texture object
-    CUDA_CHECK(cudaDestroyTextureObject(texObj));
+    CUDA_CHECK(cudaDestroyTextureObject(texObjFFTs));
     CUDA_CHECK(cudaFreeArray(cuArray));
+
+    CUDA_CHECK(cudaDestroyTextureObject(texObjKern));
+    CUDA_CHECK(cudaFreeArray(cuArrayKern));
 
     free(idx_array);
     return powers_len;

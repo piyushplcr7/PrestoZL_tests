@@ -58,7 +58,7 @@ typedef struct
 
 extern "C" extern float ***gen_f3Darr_cu(long nhgts, long nrows, long ncols, cudaStream_t stream);
 
-extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
+extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj, cudaTextureObject_t texObjKern);
 
 extern "C" extern void fuse_add_search_batch(ffdotpows_cu *fundamentals, SubharmonicMap *subhmap, int stages, int fundamental_num, cudaStream_t stream, SearchValue *search_results, unsigned long long int *search_nums, long long pre_size, int proper_batch_size, int max_searchnum, int *too_large);
 
@@ -989,7 +989,7 @@ __global__ void pre_fft_kernel_batch_float4(fcomplex *pdata_array, fcomplex *ful
 // Template with parameter N, where N denotes the amount of shared memory used in KB
 template <int N>
 __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
-	int batch_size, int ws_len, int zs_len, int fftlen, int alpha, cudaTextureObject_t texObj)
+	int batch_size, int ws_len, int zs_len, int fftlen, int alpha, cudaTextureObject_t texObjFFTs, cudaTextureObject_t texObjKern)
 {
 	// Index for the batch of size alpha
 	int b = blockIdx.x / ws_len;
@@ -1002,20 +1002,19 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 	// shared memory of N KB to hold the input fft data.
 	//__shared__ fcomplex shared_buffer[N * 128];
 	//__shared__ float4 shared_buffer[N * 64];
-	__shared__ float __align__(128) shared_buffer[N * 256];
+	//__shared__ float __align__(128) shared_buffer[N * 256];
 
 	if (kk < fftlen/2) { 
 		
 		// Load the FFT and kernel data into rows of shared memory
-		for (int i = 0 ; i < alpha ; ++i) {
+		/* for (int i = 0 ; i < alpha ; ++i) {
 			
 			//float4 *pdata = (float4 *)(&pdata_array[(alpha * b + i) * fftlen]);
 
 			//float4 pdata_kk = pdata[kk];
 
 			// Load pdata using the texture object. The indices used for the texture object are global
-			//float4 pdata_kk = tex2D(texObj, (float)kk, (float)(alpha * b + i));
-			float4 pdata_kk = tex2D<float4>(texObj, (float)kk, (float)(alpha * b + i));
+			float4 pdata_kk = tex2D<float4>(texObjFFTs, (float)kk, (float)(alpha * b + i));
 
 			// FFTs in the first alpha rows
 			shared_buffer[(4*i    ) * blockDim.x + threadIdx.x] = pdata_kk.x; // R0
@@ -1029,9 +1028,11 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 			
 			// Ensuring the kernels are within zs_len limit
 			if (alpha * jj + i < zs_len) {
-				float4 *fkern = (float4 *)(&fkern_gpu[(ii * zs_len + (alpha * jj + i)) * fftlen]);
+				//float4 *fkern = (float4 *)(&fkern_gpu[(ii * zs_len + (alpha * jj + i)) * fftlen]);
 
-				float4 fkern_kk = fkern[kk];
+				//float4 fkern_kk = fkern[kk];
+
+				float4 fkern_kk = tex2D<float4>(texObjKern, (float)kk, (float) ( (ii * zs_len + (alpha * jj + i))));
 
 				// Kernels in the last alpha rows
 
@@ -1040,7 +1041,7 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 				shared_buffer[(4*(alpha + i) + 2) * blockDim.x + threadIdx.x] = fkern_kk.z; // R1
 				shared_buffer[(4*(alpha + i) + 3) * blockDim.x + threadIdx.x] = fkern_kk.w; // C1
 			}
-		}
+		} */
 		// Sync threads
 		//__syncthreads();
 		// Compute the complex multiplication and write to global memory
@@ -1051,10 +1052,8 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 			/* if (alpha * b + fftrow >= batch_size) {
 				break;
 			} */
-			float px = shared_buffer[(4 * fftrow    ) * blockDim.x + threadIdx.x];
-			float py = shared_buffer[(4 * fftrow + 1) * blockDim.x + threadIdx.x];
-			float pz = shared_buffer[(4 * fftrow + 2) * blockDim.x + threadIdx.x];
-			float pw = shared_buffer[(4 * fftrow + 3) * blockDim.x + threadIdx.x];
+			float4 p = tex2D<float4>(texObjFFTs, (float)kk, (float)(alpha * b + fftrow));
+
 			
 			//size_t batch_idx = (alpha * b + fftrow) * (fftlen * ws_len * zs_len);
 			for (int kernrow = 0 ; kernrow < alpha ; ++kernrow) {
@@ -1065,21 +1064,18 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 
 				//float4 k = shared_buffer[(alpha + kernrow) * blockDim.x + threadIdx.x];
 
-				float kx = shared_buffer[(4 * (alpha + kernrow)    ) * blockDim.x + threadIdx.x];
-				float ky = shared_buffer[(4 * (alpha + kernrow) + 1) * blockDim.x + threadIdx.x];
-				float kz = shared_buffer[(4 * (alpha + kernrow) + 2) * blockDim.x + threadIdx.x];
-				float kw = shared_buffer[(4 * (alpha + kernrow) + 3) * blockDim.x + threadIdx.x];
+				float4 k = tex2D<float4>(texObjKern, (float)kk, (float) ( (ii * zs_len + (alpha * jj + kernrow))));
 
 				float4 *fdata = (float4 *)(&full_tmpdat_array[(alpha * b + fftrow) * (fftlen * ws_len * zs_len) 
 															+ calc_index_dev(ii, (alpha * jj + kernrow), ws_len, zs_len, fftlen)]);
 
 				float2 res1;
-				res1.x = fmaf(px, kx, py * ky);     // real: p.x * k.x + p.y * k.y
-				res1.y = fmaf(py, kx, -px * ky);    // imag: p.y * k.x - p.x * k.y
+				res1.x = fmaf(p.x, k.x, p.y * k.y);     // real: p.x * k.x + p.y * k.y
+				res1.y = fmaf(p.y, k.x, -p.x * k.y);    // imag: p.y * k.x - p.x * k.y
 
 				float2 res2;
-				res2.x = fmaf(pz, kz, pw * kw);
-				res2.y = fmaf(pw, kz, -pz * kw);
+				res2.x = fmaf(p.z, k.z, p.w * k.w);
+				res2.y = fmaf(p.w, k.z, -p.z * k.w);
 				
 
 				// Store results into fdata
@@ -1142,7 +1138,7 @@ void sort_search_results(SearchValue *search_results, unsigned long long int sea
 
 void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
 				  fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream,
-				  cudaTextureObject_t texObj)
+				  cudaTextureObject_t texObj, cudaTextureObject_t texObjKern)
 {
 	int ws_len_global = ffdot_array[0].numws;
 	int zs_len_global = ffdot_array[0].numzs;
@@ -1201,7 +1197,7 @@ void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharmi
 	// 2. run pre_fft_kernel
 	int threads_pre = 512; // Equal to B in my notes
 	// Shared memory size in KB
-	const int shared_mem_size = 32;
+	const int shared_mem_size = 16 * 2;
 	int alpha = 32 * shared_mem_size/threads_pre;
 	int beta = (batch_size + alpha - 1)/ alpha;
 
@@ -1212,7 +1208,7 @@ void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharmi
 
 		//cudaEventRecord(start,stream);
 		pre_fft_kernel_batch_float4_modified<shared_mem_size><<<blocks_pre, threads_pre, 0, stream>>>(
-			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
+			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj, texObjKern);
 		//cudaEventRecord(stop,stream);
 		//cudaEventSynchronize(stop);
 		//cudaEventElapsedTime(&elapsed, start, stop);

@@ -869,6 +869,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     pdata_copy_finished,
                     pdata_stream);
 
+                /* CUDA_CHECK(cudaDeviceSynchronize());
+                exit(1); */
                 /* if (j == 0) {
                     powers_size += powers_len_fund * sizeof(float) / bytes_in_GB;
                     printf("fund powers size = %f GB\n", powers_len_fund * sizeof(float)/bytes_in_GB);
