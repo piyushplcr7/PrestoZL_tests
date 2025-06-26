@@ -1009,13 +1009,13 @@ __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcom
 		// Load the FFT and kernel data into rows of shared memory
 		for (int i = 0 ; i < alpha ; ++i) {
 			
-			//float4 *pdata = (float4 *)(&pdata_array[(alpha * b + i) * fftlen]);
+			float4 *pdata = (float4 *)(&pdata_array[(alpha * b + i) * fftlen]);
 
-			//float4 pdata_kk = pdata[kk];
+			float4 pdata_kk = pdata[kk];
 
 			// Load pdata using the texture object. The indices used for the texture object are global
 			//float4 pdata_kk = tex2D(texObj, (float)kk, (float)(alpha * b + i));
-			float4 pdata_kk = tex2D<float4>(texObj, (float)kk, (float)(alpha * b + i));
+			//float4 pdata_kk = tex2D<float4>(texObj, (float)kk, (float)(alpha * b + i));
 
 			// FFTs in the first alpha rows
 			shared_buffer[(4*i    ) * blockDim.x + threadIdx.x] = pdata_kk.x; // R0
@@ -1201,7 +1201,7 @@ void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharmi
 	// 2. run pre_fft_kernel
 	int threads_pre = 512; // Equal to B in my notes
 	// Shared memory size in KB
-	const int shared_mem_size = 32;
+	const int shared_mem_size = 64;
 	int alpha = 32 * shared_mem_size/threads_pre;
 	int beta = (batch_size + alpha - 1)/ alpha;
 
