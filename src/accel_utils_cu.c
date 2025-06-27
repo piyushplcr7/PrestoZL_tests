@@ -29,7 +29,7 @@
 #define NEAREST_INT(x) (int)(x < 0 ? x - 0.5 : x + 0.5)
 
 void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
-    fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
+    fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream);
 
 unsigned short **inds_array;
 
@@ -1054,7 +1054,7 @@ size_t subharm_fderivs_vol_cu_batch(
     //struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
 
     // For float4
-    struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
+/*     struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
     cudaArray_t cuArray;
     // 2 * fftlen is the width, batch_size is the height
     CUDA_CHECK(cudaMallocArray(&cuArray, &channelDesc, fftlen/2 , batch_size, cudaArrayDefault));
@@ -1083,7 +1083,7 @@ size_t subharm_fderivs_vol_cu_batch(
     texDesc.normalizedCoords = 0;
 
     cudaTextureObject_t texObj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL));
+    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL)); */
 
     free(rinds);
     free(zinds);    
@@ -1139,12 +1139,12 @@ size_t subharm_fderivs_vol_cu_batch(
     #ifdef PINNED_PDATA_ALL
     CUDA_CHECK(cudaStreamWaitEvent(stream, pdata_copy_finished, 0));
     #endif
-    do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream, texObj);
+    do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream);
     //CUDA_CHECK(cudaFreeAsync(pdata_dev, stream));
     
     // Destroy the texture object
-    CUDA_CHECK(cudaDestroyTextureObject(texObj));
-    CUDA_CHECK(cudaFreeArray(cuArray));
+    //CUDA_CHECK(cudaDestroyTextureObject(texObj));
+    //CUDA_CHECK(cudaFreeArray(cuArray));
 
     free(idx_array);
     return powers_len;

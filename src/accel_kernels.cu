@@ -59,7 +59,7 @@ typedef struct
 
 extern "C" extern float ***gen_f3Darr_cu(long nhgts, long nrows, long ncols, cudaStream_t stream);
 
-extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
+extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream);
 
 extern "C" extern void fuse_add_search_batch(ffdotpows_cu *fundamentals, SubharmonicMap *subhmap, int stages, int fundamental_num, cudaStream_t stream, SearchValue *search_results, unsigned long long int *search_nums, long long pre_size, int proper_batch_size, int max_searchnum, int *too_large);
 
@@ -990,7 +990,7 @@ __global__ void pre_fft_kernel_batch_float4(fcomplex *pdata_array, fcomplex *ful
 // Template with parameter N, where N denotes the amount of shared memory used in KB
 template <int N>
 __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
-	int batch_size, int ws_len, int zs_len, int fftlen, int alpha, cudaTextureObject_t texObj)
+	int batch_size, int ws_len, int zs_len, int fftlen, int alpha)
 {
 	// Index for the batch of size alpha
 	int b = blockIdx.x / ws_len;
@@ -1142,8 +1142,7 @@ void sort_search_results(SearchValue *search_results, unsigned long long int sea
 }
 
 void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
-				  fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream,
-				  cudaTextureObject_t texObj)
+				  fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream)
 {
 	int ws_len_global = ffdot_array[0].numws;
 	int zs_len_global = ffdot_array[0].numzs;
@@ -1217,7 +1216,7 @@ void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharmi
 
 		//cudaEventRecord(start,stream);
 		pre_fft_kernel_batch_float4_modified<shared_mem_size><<<blocks_pre, threads_pre, 0, stream>>>(
-			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
+			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha);
 		//cudaEventRecord(stop,stream);
 		//cudaEventSynchronize(stop);
 		//cudaEventElapsedTime(&elapsed, start, stop);
