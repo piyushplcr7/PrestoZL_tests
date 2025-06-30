@@ -25,7 +25,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 
-#include "accel.h"
+#include "accel_includes_noglib.h"
 #include "device_launch_parameters.h"
 #include "cufft.h"
 #include "cuda_helper.h"
