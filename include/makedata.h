@@ -1,3 +1,6 @@
+#ifndef MAKEDATAH
+#define MAKEDATAH
+
 /*    Pulsar Data Generation Program       */
 /*          by Scott Ransom                */
 
@@ -73,3 +76,5 @@ double modsin(double val);
 double crab(double val);
 double spike(double val);
 double gauss(double val);
+
+#endif

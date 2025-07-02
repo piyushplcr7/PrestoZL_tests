@@ -1,3 +1,6 @@
+#ifndef DATABASEH
+#define DATABASEH
+
 /* Number of entries in PSR database */
 #define NP  10000
 #define NBP 200
@@ -79,3 +82,4 @@ int get_psr_at_epoch(char *psrname, double epoch, psrparams *psr);
 /* The int returned is the number of the pulsar in the database.    */
 /* If the int = 0, then no match was found.                         */
 
+#endif
