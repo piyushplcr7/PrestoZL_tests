@@ -387,6 +387,21 @@ fcomplex *gen_w_response(double roffset, int numbetween, double z, \
   /*    'numkern' is the number of complex points that the kernel will */
   /*       contain.                                                    */
 
+  fcomplex *gen_w_response_modified(double roffset, int numbetween, double z, \
+                         double w, int numkern, int max_w_resp_halfwidth);
+  /*  Generate the response function for Fourier f-dot interpolation.  */
+  /*  Arguments:                                                       */
+  /*    'roffset' is the offset in Fourier bins for the full response  */
+  /*       (i.e. At this point, the response would equal 1.0)          */
+  /*    'numbetween' is the number of points to interpolate between    */
+  /*       each standard FFT bin.  (i.e. 'numbetween' = 1 = interbins) */
+  /*    'z' is the average Fourier Frequency derivative (# of bins     */
+  /*       the signal smears over during the observation).             */
+  /*    'w' is the Fourier Frequency 2nd derivative (change in the     */
+  /*       Fourier f-dot during the observation).                      */
+  /*    'numkern' is the number of complex points that the kernel will */
+  /*       contain.                                                    */
+
 fcomplex *gen_w_response2(double roffset, int numbetween, double z, \
                           double w, int numkern);
   /*  Generate the response function for Fourier f-dot interpolation.  */

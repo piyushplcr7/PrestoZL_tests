@@ -148,7 +148,7 @@ static int calc_fftlen(int numharm, int harmnum, int max_zfull, int max_wfull, a
     return next_good_fftlen(bins_needed + end_effects);
 }
 
-static void init_kernel(int z, int w, int fftlen, kernel *kern)
+static void init_kernel(int z, int w, int fftlen, kernel *kern, int max_w_resp_halfwidth)
 {
     int numkern;
     fcomplex *tempkern;
@@ -161,7 +161,7 @@ static void init_kernel(int z, int w, int fftlen, kernel *kern)
     numkern = 2 * kern->numbetween * kern->kern_half_width;
     kern->numgoodbins = kern->fftlen - numkern;
     kern->data = gen_cvect(kern->fftlen);
-    tempkern = gen_w_response(0.0, kern->numbetween, kern->z, kern->w, numkern);
+    tempkern = gen_w_response_modified(0.0, kern->numbetween, kern->z, kern->w, numkern, max_w_resp_halfwidth);
     place_complex_kernel(tempkern, numkern, kern->data, kern->fftlen);
     vect_free(tempkern);
     COMPLEXFFT(kern->data, kern->fftlen, -1);
@@ -262,6 +262,18 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
 
     pthread_create(&thread, NULL, allocate_pinned_memory, &args); */
 
+    // Get the maximum w_resp_halfwidth for this subharmonic
+    int max_w_resp_halfwidth = 0;
+
+    for (ii = 0; ii < shi->numkern_wdim; ii++)
+    {
+        for (jj = 0; jj < shi->numkern_zdim; jj++)
+        {
+            int current_halfwidth = w_resp_halfwidth((double)(-shi->zmax + jj * ACCEL_DZ), (double)(-shi->wmax + ii * ACCEL_DW), LOWACC);
+            max_w_resp_halfwidth = max_w_resp_halfwidth > current_halfwidth ? max_w_resp_halfwidth : current_halfwidth;
+        }
+    }
+
     /* Allocate 2D array of kernels, with dimensions being z and w */
     shi->kern = gen_kernmatrix(shi->numkern_zdim, shi->numkern_wdim);
     /* Actually append kernels to each array element */
@@ -270,7 +282,7 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
         for (jj = 0; jj < shi->numkern_zdim; jj++)
         {
             init_kernel(-shi->zmax + jj * ACCEL_DZ,
-                        -shi->wmax + ii * ACCEL_DW, fftlen, &shi->kern[ii][jj]);
+                        -shi->wmax + ii * ACCEL_DW, fftlen, &shi->kern[ii][jj], max_w_resp_halfwidth);
         }
     }
 
