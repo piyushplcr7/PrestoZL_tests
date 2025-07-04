@@ -1015,10 +1015,6 @@
  
 			 float4 pdata_kk = pdata[kk];
  
-			 // Load pdata using the texture object. The indices used for the texture object are global
-			 //float4 pdata_kk = tex2D(texObj, (float)kk, (float)(alpha * b + i));
-			 //float4 pdata_kk = tex2D<float4>(texObj, (float)kk, (float)(alpha * b + i));
- 
 			 // FFTs in the first alpha rows
 			 shared_buffer[(4*i    ) * blockDim.x + threadIdx.x] = pdata_kk.x; // R0
 			 shared_buffer[(4*i + 1) * blockDim.x + threadIdx.x] = pdata_kk.y; // C0
@@ -1043,8 +1039,7 @@
 				 shared_buffer[(4*(alpha + i) + 3) * blockDim.x + threadIdx.x] = fkern_kk.w; // C1
 			 }
 		 }
-		 // Sync threads
-		 //__syncthreads();
+
 		 // Compute the complex multiplication and write to global memory
  
 		 // Loop over the FFTs
@@ -1060,36 +1055,37 @@
 			 
 			 //size_t batch_idx = (alpha * b + fftrow) * (fftlen * ws_len * zs_len);
 			 for (int kernrow = 0 ; kernrow < alpha ; ++kernrow) {
- 
+				float2 res1, res2;
+
 				 if (alpha * jj + kernrow >= zs_len) {
 					 break;
 				 }
- 
-				 //float4 k = shared_buffer[(alpha + kernrow) * blockDim.x + threadIdx.x];
- 
-				 float kx = shared_buffer[(4 * (alpha + kernrow)    ) * blockDim.x + threadIdx.x];
-				 float ky = shared_buffer[(4 * (alpha + kernrow) + 1) * blockDim.x + threadIdx.x];
-				 float kz = shared_buffer[(4 * (alpha + kernrow) + 2) * blockDim.x + threadIdx.x];
-				 float kw = shared_buffer[(4 * (alpha + kernrow) + 3) * blockDim.x + threadIdx.x];
- 
+
 				 float4 *fdata = (float4 *)(&full_tmpdat_array[(alpha * b + fftrow) * (fftlen * ws_len * zs_len) 
-															 + calc_index_dev(ii, (alpha * jj + kernrow), ws_len, zs_len, fftlen)]);
+					+ calc_index_dev(ii, (alpha * jj + kernrow), ws_len, zs_len, fftlen)]);
  
-				 float2 res1;
-				 res1.x = fmaf(px, kx, py * ky);     // real: p.x * k.x + p.y * k.y
-				 res1.y = fmaf(py, kx, -px * ky);    // imag: p.y * k.x - p.x * k.y
- 
-				 float2 res2;
-				 res2.x = fmaf(pz, kz, pw * kw);
-				 res2.y = fmaf(pw, kz, -pz * kw);
+				float ky = shared_buffer[(4 * (alpha + kernrow) + 1) * blockDim.x + threadIdx.x];
+				res1.x = fmaf(py, ky, 0.0f);
+				res1.y = fmaf(-px, ky, 0.0f);
+
+
+				 float kx = shared_buffer[(4 * (alpha + kernrow)    ) * blockDim.x + threadIdx.x];
+				 res1.x = fmaf(px, kx, res1.x);    
+				 res1.y = fmaf(py, kx, res1.y);    
+
+
+				 float kw = shared_buffer[(4 * (alpha + kernrow) + 3) * blockDim.x + threadIdx.x];
+				 res2.x = fmaf(pw, kw, 0.0f);
+				 res2.y = fmaf(-pz, kw, 0.0f);
 				 
+				 
+				 float kz = shared_buffer[(4 * (alpha + kernrow) + 2) * blockDim.x + threadIdx.x];
+				 res2.x = fmaf(pz, kz, res2.x);
+				 res2.y = fmaf(pw, kz, res2.y);
  
 				 // Store results into fdata
 				 fdata[kk] = make_float4(res1.x, res1.y, res2.x, res2.y);
 				 
- 
-				 // Store results into fdata
-				 //fdata[kk] = make_float4(fmaf(p.x, k.x, p.y * k.y), fmaf(p.y, k.x, -p.x * k.y), fmaf(p.z, k.z, p.w * k.w), fmaf(p.w, k.z, -p.z * k.w));
  
 			 }
 		 }
@@ -1177,26 +1173,26 @@
 				 if (alpha * jj + kernrow >= zs_len) {
 					 break;
 				 }
- 
-				 //float4 k = shared_buffer[(alpha + kernrow) * blockDim.x + threadIdx.x];
- 
-				 float kx = shared_buffer[(2 * (alpha + kernrow)    ) * blockDim.x + threadIdx.x];
-				 float ky = shared_buffer[(2 * (alpha + kernrow) + 1) * blockDim.x + threadIdx.x];
- 
+
 				 float2 *fdata = (float2 *)(&full_tmpdat_array[(alpha * b + fftrow) * (fftlen * ws_len * zs_len) 
-															 + calc_index_dev(ii, (alpha * jj + kernrow), ws_len, zs_len, fftlen)]);
+					+ calc_index_dev(ii, (alpha * jj + kernrow), ws_len, zs_len, fftlen)]);
+					
+				float2 res1;
  
-				 float2 res1;
-				 res1.x = fmaf(px, kx, py * ky);     // real: p.x * k.x + p.y * k.y
-				 res1.y = fmaf(py, kx, -px * ky);    // imag: p.y * k.x - p.x * k.y
+				 float ky = shared_buffer[(2 * (alpha + kernrow) + 1) * blockDim.x + threadIdx.x];
+
+				 res1.x = fmaf(py, ky, 0.0f);
+
+				 res1.y = fmaf(-px, ky, 0.0f);
+
+				 float kx = shared_buffer[(2 * (alpha + kernrow)    ) * blockDim.x + threadIdx.x];
+
+				 res1.x = fmaf(px, kx, res1.x);     // real: p.x * k.x + p.y * k.y
 				 
+				 res1.y = fmaf(py, kx, res1.y);    // imag: p.y * k.x - p.x * k.y
  
 				 // Store results into fdata
-				 fdata[kk] = make_float2(res1.x, res1.y);
-				 
- 
-				 // Store results into fdata
-				 //fdata[kk] = make_float4(fmaf(p.x, k.x, p.y * k.y), fmaf(p.y, k.x, -p.x * k.y), fmaf(p.z, k.z, p.w * k.w), fmaf(p.w, k.z, -p.z * k.w));
+				 fdata[kk] = res1;
  
 			 }
 		 }
@@ -1307,47 +1303,52 @@
 		 cu_plan_array[b] = cu_plan;
 		 CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan, stream));
 	 }
+
+	 #define COMPLEXPERTHREAD2
  
 	 // 2. run pre_fft_kernel
 	 int threads_pre = 768; // Equal to B in my notes
+
 	 // Shared memory size in KB
-	 const int shared_mem_size = 16 * 6;
-	 size_t shared_mem_size_bytes = shared_mem_size * 1024;
-
-	 // alpha according to C = 2, ie each thread loads two complex no.s
-	 //int alpha = 32 * shared_mem_size/threads_pre;
-
+	 const int shared_mem_size = 16 * 3;
+	 
+	 #ifdef COMPLEXPERTHREAD1
 	 // alpha according to C = 1, ie each thread loads one complex no.
 	 int alpha = 64 * shared_mem_size/threads_pre;
+	 #else
+	 // alpha according to C = 2, ie each thread loads two complex no.s
+	 int alpha = 32 * shared_mem_size/threads_pre;
+	 #endif
 
 	 int beta = (batch_size + alpha - 1)/ alpha;
  
 	 if (batch_size % alpha == 0) {
+		size_t shared_mem_size_bytes = shared_mem_size * 1024;
+
 		 cudaFuncSetAttribute(
-			 //pre_fft_kernel_batch_float4_modified<shared_mem_size>,
+			 #ifdef COMPLEXPERTHREAD1
 			 pre_fft_kernel_batch_float4_modi5,
+			 #else
+			 pre_fft_kernel_batch_float4_modified,
+			 #endif
 			 cudaFuncAttributeMaxDynamicSharedMemorySize,
 			 shared_mem_size_bytes); 
+			 
 		 int zs_len_reduced = (zs_len_global + alpha - 1)/alpha;
- 
-		// dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen/2 + threads_pre - 1) / threads_pre);
- 
-		 //cudaEventRecord(start,stream);
-		 /* pre_fft_kernel_batch_float4_modified<shared_mem_size><<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
-			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
-		  */
-		 /* pre_fft_kernel_batch_float4_modified<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
-			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj); */
 
+		 #ifdef COMPLEXPERTHREAD1
 		 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen + threads_pre - 1) / threads_pre);
 		 pre_fft_kernel_batch_float4_modi5<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
 			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
-		 //cudaEventRecord(stop,stream);
-		 //cudaEventSynchronize(stop);
-		 //cudaEventElapsedTime(&elapsed, start, stop);
-		 //printf("Time for new fft kernel = %f (ms)\n", elapsed);
+		 #else
+		 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen/2 + threads_pre - 1) / threads_pre);
+		 pre_fft_kernel_batch_float4_modified<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
+			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
+		 #endif
+		 
 	 }
 	 else {
+		threads_pre = 512;
 		 dim3 blocks_pre(batch_size * ws_len_global, zs_len_global, (fftlen / 2 + threads_pre - 1) / threads_pre);
 	 
 		 //cudaEventRecord(start,stream);
