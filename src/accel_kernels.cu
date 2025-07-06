@@ -1014,29 +1014,36 @@
 			 float4 *pdata = (float4 *)(&pdata_array[(alpha * b + i) * fftlen]);
  
 			 float4 pdata_kk = pdata[kk];
+
+			 int4 addresses;
+			 addresses.x = (4*i    ) * blockDim.x + threadIdx.x;
+			 addresses.y = (4*i + 1) * blockDim.x + threadIdx.x;
+			 addresses.z = (4*i + 2) * blockDim.x + threadIdx.x;
+			 addresses.w = (4*i + 3) * blockDim.x + threadIdx.x;
  
 			 // FFTs in the first alpha rows
-			 shared_buffer[(4*i    ) * blockDim.x + threadIdx.x] = pdata_kk.x; // R0
-			 shared_buffer[(4*i + 1) * blockDim.x + threadIdx.x] = pdata_kk.y; // C0
-			 shared_buffer[(4*i + 2) * blockDim.x + threadIdx.x] = pdata_kk.z; // R1
-			 shared_buffer[(4*i + 3) * blockDim.x + threadIdx.x] = pdata_kk.w; // C1
- 
-		 }
- 
-		 for (int i = 0 ; i < alpha ; ++i) {
+			 shared_buffer[addresses.x] = pdata_kk.x; // R0
+			 shared_buffer[addresses.y] = pdata_kk.y; // C0
+			 shared_buffer[addresses.z] = pdata_kk.z; // R1
+			 shared_buffer[addresses.w] = pdata_kk.w; // C1
 			 
 			 // Ensuring the kernels are within zs_len limit
 			 if (alpha * jj + i < zs_len) {
 				 float4 *fkern = (float4 *)(&fkern_gpu[(ii * zs_len + (alpha * jj + i)) * fftlen]);
  
 				 float4 fkern_kk = fkern[kk];
- 
+				
+				 int4 kern_addresses;
+				 kern_addresses.x = (4*(alpha + i)    ) * blockDim.x + threadIdx.x;
+				 kern_addresses.y = (4*(alpha + i) + 1) * blockDim.x + threadIdx.x;
+				 kern_addresses.z = (4*(alpha + i) + 2) * blockDim.x + threadIdx.x;
+				 kern_addresses.w = (4*(alpha + i) + 3) * blockDim.x + threadIdx.x;
 				 // Kernels in the last alpha rows
  
-				 shared_buffer[(4*(alpha + i)    ) * blockDim.x + threadIdx.x] = fkern_kk.x; // R0
-				 shared_buffer[(4*(alpha + i) + 1) * blockDim.x + threadIdx.x] = fkern_kk.y; // C0
-				 shared_buffer[(4*(alpha + i) + 2) * blockDim.x + threadIdx.x] = fkern_kk.z; // R1
-				 shared_buffer[(4*(alpha + i) + 3) * blockDim.x + threadIdx.x] = fkern_kk.w; // C1
+				 shared_buffer[kern_addresses.x] = fkern_kk.x; // R0
+				 shared_buffer[kern_addresses.y] = fkern_kk.y; // C0
+				 shared_buffer[kern_addresses.z] = fkern_kk.z; // R1
+				 shared_buffer[kern_addresses.w] = fkern_kk.w; // C1
 			 }
 		 }
 
@@ -1307,10 +1314,10 @@
 	 #define COMPLEXPERTHREAD2
  
 	 // 2. run pre_fft_kernel
-	 int threads_pre = 768; // Equal to B in my notes
+	 int threads_pre = 1024; // Equal to B in my notes
 
 	 // Shared memory size in KB
-	 const int shared_mem_size = 16 * 3;
+	 const int shared_mem_size = 16 * 4;
 	 
 	 #ifdef COMPLEXPERTHREAD1
 	 // alpha according to C = 1, ie each thread loads one complex no.
