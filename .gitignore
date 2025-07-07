@@ -1,3 +1,8 @@
+./bin/prepsubband_cu
+*.py
+*.txt
+*.out
+profiler_out/
 *.[oa]
 *.so
 *.dylib

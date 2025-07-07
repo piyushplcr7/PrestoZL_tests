@@ -506,7 +506,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     CUDA_CHECK(cudaStreamCreate(&sub_stream));
 
     // Init subw_host，powcuts_host，numharms_host，numindeps_host
-    int single_loop = 1 << (obs.numharmstages - 1);
+    int total_harmonic_fractions = 1 << (obs.numharmstages - 1);
     int fundamental_wlo = NEAREST_INT(ACCEL_RDW * obs.wlo) * ACCEL_DW;
     int fundamental_zlo = NEAREST_INT(ACCEL_RDZ * obs.zlo) * ACCEL_DZ;
     int fundamental_numws = subharminfs[0][0].numkern_wdim;
@@ -525,8 +525,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     // Allocating pinned memory for transfer to GPU
     // Can it be done in parallel?
     int *subw_host; 
-    CUDA_CHECK(cudaMallocHost(&subw_host, single_loop * fundamental_numws * sizeof(int)));
-    allocated_pinned_memory += single_loop * fundamental_numws * sizeof(int)/ bytes_in_GB;
+    CUDA_CHECK(cudaMallocHost(&subw_host, total_harmonic_fractions * fundamental_numws * sizeof(int)));
+    allocated_pinned_memory += total_harmonic_fractions * fundamental_numws * sizeof(int)/ bytes_in_GB;
 
     float *powcuts_host;
     CUDA_CHECK(cudaMallocHost(&powcuts_host, obs.numharmstages * sizeof(float)));
@@ -573,7 +573,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
     clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     // Copy to the GPU. Since it occupies less space than the GPU constant memory size, place it in the GPU constant memory
-    init_constant_device(subw_host, single_loop * fundamental_numws, powcuts_host, numharms_host, numindeps_host, obs.numharmstages);
+    init_constant_device(subw_host, total_harmonic_fractions * fundamental_numws, powcuts_host, numharms_host, numindeps_host, obs.numharmstages);
     clock_gettime(CLOCK_MONOTONIC, &end_cpu);
     double elapsed_cpu = (end_cpu.tv_sec - start_cpu.tv_sec) +
                      (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
@@ -612,7 +612,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     printf("fkern host to device: %.9f seconds\n", elapsed_cpu);
     printf("fkern host to device (CUDA Timing): %.9f seconds\n", elapsed/1000.0f);
 
-    init_inds_array(single_loop);
+    init_inds_array(total_harmonic_fractions);
 
     /* Start the main search loop */
     {
@@ -770,7 +770,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         unsigned short* rinds_all;
         unsigned short* zinds_all;
         
-        int total_harmonic_fractions = 1<< (obs.numharmstages-1);
+        //int total_harmonic_fractions = 1<< (obs.numharmstages-1);
         unsigned short* rinds_all_master[total_harmonic_fractions];
         unsigned short* zinds_all_master[total_harmonic_fractions];
 

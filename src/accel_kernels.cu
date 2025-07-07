@@ -25,11 +25,12 @@
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 
-#include "accel.h"
+#include "accel_includes_noglib.h"
 #include "device_launch_parameters.h"
 #include "cufft.h"
 #include "cuda_helper.h"
 #include <math.h>
+#include <nvtx3/nvToolsExt.h>
 
 __constant__ int subw_device[12006];
 __constant__ float powcuts_device[6];
