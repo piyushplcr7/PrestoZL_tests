@@ -974,12 +974,18 @@
 		 float2 res2 = make_float2(p.z * k.z + p.w * k.w, p.w * k.z - p.z * k.w);  */
  
 		 float2 res1;
-		 res1.x = fmaf(p.x, k.x, p.y * k.y);     // real: p.x * k.x + p.y * k.y
-		 res1.y = fmaf(p.y, k.x, -p.x * k.y);    // imag: p.y * k.x - p.x * k.y
+		 res1.x = fmaf(p.y, k.y, 0.0f);
+		 res1.x = fmaf(p.x, k.x, res1.x);     // real: p.x * k.x + p.y * k.y
+
+		 res1.y = fmaf(-p.x, k.y, 0.0f);
+		 res1.y = fmaf(p.y, k.x, res1.y);    // imag: p.y * k.x - p.x * k.y
  
 		 float2 res2;
-		 res2.x = fmaf(p.z, k.z, p.w * k.w);
-		 res2.y = fmaf(p.w, k.z, -p.z * k.w);
+		 res2.x = fmaf(p.w, k.w, 0.0f);
+		 res2.x = fmaf(p.z, k.z, res2.x);
+
+		 res2.y = fmaf(-p.z, k.w, 0.0f);
+		 res2.y = fmaf(p.w, k.z, res2.y);
 		 
  
 		 // Store results into fdata
