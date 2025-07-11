@@ -22,6 +22,7 @@
 #include <math.h>
 #include <assert.h>
 #include <time.h>
+//#include "cufft_optimal_size.h"
 /*#undef USEMMAP*/
 
 #ifdef USEMMAP
@@ -46,6 +47,9 @@ extern void set_openmp_numthreads(int numthreads);
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #define NEAREST_INT(x) (int)(x < 0 ? x - 0.5 : x + 0.5)
+
+void testcufftbatchsize(int batch_size, fcomplex *full_tmpdat_array,
+    subharminfo **subharminfs, int stages);
 
 void free_ffdotpows_cu_batch(ffdotpows_cu *ffd_array, int batch_size,
                              cudaStream_t sub_stream);
@@ -683,8 +687,10 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         zs_len_max = shii->numkern_zdim;
         fft_len_max = shii->kern[0][0].fftlen;
 
+        printf("Map size = %d\n", map_size);
         for (int i = 0; i < map_size; i++)
         {
+            printf("harmonic %d/%d: %d X %d FFTs \n", map[i].key.harm, map[i].key.harmtosum, map[i].value.shi->numkern_wdim * map[i].value.shi->numkern_zdim, map[i].value.shi->kern[0][0].fftlen);
             fft_len_max = MAX(map[i].value.shi->kern[0][0].fftlen, fft_len_max);
             zs_len_max = MAX(map[i].value.shi->numkern_zdim, zs_len_max);
             ws_len_max = MAX(map[i].value.shi->numkern_wdim, ws_len_max);
@@ -724,7 +730,12 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         // possibly be improved using cuda events and waiting for the event to finish using cudaStreamWaitEvent(target_stream, event, flags)
         CUDA_CHECK(cudaMallocAsync(&full_tmpdat_array, array_size, main_stream)); // Allocate an array of pointers on the device
 
+        printf("Full tmpdat array can hold: %d X %d FFTs\n", ws_len_max * zs_len_max, fft_len_max);
+        printf("Fundamental subharmonic info: %d X %d FFTs\n", subharminfs[0][0].numkern, subharminfs[0][0].kern[0][0].fftlen);
+
         //fcomplex* full_tmpdat_array_cpu = malloc(array_size);
+        //testcufftbatchsize(proper_batch_size, full_tmpdat_array, subharminfs, obs.numharmstages);
+        //exit(1);
 
         SubharmonicMap *subharmonics_add;
         CUDA_CHECK(cudaMallocAsync(&subharmonics_add, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), main_stream));
