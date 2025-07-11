@@ -331,7 +331,7 @@ fcomplex *gen_z_response(double roffset, int numbetween, double z, int numkern)
 //     1024      0.00427585   0.01669957   0.497524
 
 fcomplex *gen_w_response_modified(double roffset, int numbetween, double z,
-                         double w, int numkern, int max_w_resp_halfwidth)
+                         double w, int numkern, int max_num_pts_wdat, fftwf_plan inner_plan)
   /*  Generate the response for Fourier f, f-dot, f-dotdot interp.     */
   /*  Arguments:                                                       */
   /*    'roffset' is the offset in Fourier bins for the full response  */
@@ -378,10 +378,12 @@ fcomplex *gen_w_response_modified(double roffset, int numbetween, double z,
 
     /* Cheeose num_pts_wdat so that there is plenty of Freq range */
     /* outside of the RZW response. */
-    num_pts_wdat = next2_to_n(6 * max_w_resp_halfwidth +
-                              200 + numkern / numbetween);
-    /* num_pts_wdat = next2_to_n(6 * w_resp_halfwidth(z, w, LOWACC) +
+
+    // num_pts_wdat based on the highest w response halfwidth
+    /* num_pts_wdat = next2_to_n(6 * max_w_resp_halfwidth +
                               200 + numkern / numbetween); */
+
+    num_pts_wdat = max_num_pts_wdat;
 
     /* Otherwise initialize some data */
     dt = 1.0 / (double) num_pts_wdat;
@@ -395,27 +397,51 @@ fcomplex *gen_w_response_modified(double roffset, int numbetween, double z,
     fdd = w / 6.0;
 
     /* Generate the data set.  Use zero-padding to do the interpolation. */
-    data = gen_fvect(num_pts_wdat * numbetween);
+    // Padding of 2 more for fftw r2c transform since num_pts_wdat is even
+    /* data = gen_fvect(num_pts_wdat * numbetween);
     for (ii = 0; ii < num_pts_wdat * numbetween; ii++)
         data[ii] = 0.0;
     for (ii = 0; ii < num_pts_wdat; ii++) {
         t = ii * dt;
         phase = TWOPI * (t * (t * (t * fdd + fd) + f));
         data[ii] = amp * cos(phase);
+    } */
+
+    float* data1 = gen_fvect(num_pts_wdat * numbetween+2);
+    for (ii = 0; ii < num_pts_wdat * numbetween+2; ii++)
+        data1[ii] = 0.0;
+    for (ii = 0; ii < num_pts_wdat; ii++) {
+        t = ii * dt;
+        phase = TWOPI * (t * (t * (t * fdd + fd) + f));
+        data1[ii] = amp * cos(phase);
     }
 
     /* FFT the data */
-    realfft(data, num_pts_wdat * numbetween, -1);
+    //realfft(data, num_pts_wdat * numbetween, -1);
+
+    fftwf_execute_dft_r2c(inner_plan, data1, data1);
+    // Fixing the FFT to be consistent with realfft output
+    data1[1] = data1[num_pts_wdat * numbetween];
+
+    // Check
+    /* for (int i = 0 ; i < num_pts_wdat * numbetween ; ++i) {
+        if (fabs(data[i]-data1[i]) > 1e-7) {
+            printf("Mismatch at idx %d, \t data[%d] = %f \t data1[%d] = %f\n", i, i , data[i], i, data1[i]);
+        }
+    } */
+
 
     /* Generate the final response */
     response = gen_cvect(numkern);
 
     /* Chop off the contaminated ends and/or the extra data */
-    memcpy(response, data + 2 * (fbar * numbetween - numkern / 2),
+    memcpy(response, data1 + 2 * (fbar * numbetween - numkern / 2),
            sizeof(fcomplex) * numkern);
+    /* memcpy(response, data + 2 * (fbar * numbetween - numkern / 2),
+           sizeof(fcomplex) * numkern); */
 
     /* cleanup */
-    vect_free(data);
+    vect_free(data1);
     return response;
 }
 
