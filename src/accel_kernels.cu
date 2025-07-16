@@ -24,6 +24,7 @@
  #include <thrust/sort.h>
  #include <thrust/device_vector.h>
  #include <thrust/execution_policy.h>
+ #include "cufftwisdomdefs.h"
  
  #include "accel_includes_noglib.h"
  #include "device_launch_parameters.h"
@@ -36,6 +37,11 @@
  __constant__ float powcuts_device[6];
  __constant__ int numharms_device[6];
  __constant__ double numindeps_device[6];
+
+ #define MAX_CUFFT_WISDOM_SIZE 256
+
+ int cufftwisdomarraysize = 0;
+ cufftwisdompair cufftwisdomarray[MAX_CUFFT_WISDOM_SIZE];
  
  // Structures to store multiple subharmonics
  typedef struct
@@ -1258,6 +1264,17 @@
 	 // Use thrust sorting with the custom comparator
 	 thrust::sort(thrust::device, dev_ptr, dev_ptr + search_num, CompareSearchValue());
  }
+
+ // Takes in the fft length and spits out the ideal batch size
+ int search_cufft_wisdom(int fftlen) {
+	for (int i = 0 ; i < cufftwisdomarraysize; ++i) {
+		if (cufftwisdomarray[i].fftlen == fftlen) {
+			return cufftwisdomarray[i].batch_size;
+		}
+	}
+
+	return 0;
+ }
  
  void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
 				   fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream,
@@ -1265,58 +1282,178 @@
  {
 	 int ws_len_global = ffdot_array[0].numws;
 	 int zs_len_global = ffdot_array[0].numzs;
- 
-	 /* cudaEvent_t start,stop;
-	 CUDA_CHECK(cudaEventCreate(&start));
-	 CUDA_CHECK(cudaEventCreate(&stop));
-	 float elapsed; */
- 
-	 cufftHandle *cu_plan_array = (cufftHandle *)malloc(batch_size * sizeof(cufftHandle));
- 
-	 // 1. handle operations before the pre_fft_kernel call, prepare cu_plan
-	 for (int b = 0; b < batch_size; b++)
-	 {
-		 ffdotpows_cu *ffdot = &ffdot_array[b];
-		 const float norm = 1.0 / (fftlen * fftlen);
-		 const int offset = binoffset * ACCEL_NUMBETWEEN;
-		 int ws_len = ffdot->numws;
-		 int zs_len = ffdot->numzs;
-		 int rs_len = ffdot->numrs;
- 
-		 size_t full_size = ws_len * zs_len;
- 
-		 cufftHandle cu_plan;
-		 int rank = 1;
-		 int n[1] = {fftlen};
-		 int istride = 1, idist = fftlen;
-		 int ostride = 1, odist = fftlen;
-		 int inembed[3] = {ws_len, zs_len, fftlen};
-		 int onembed[3] = {ws_len, zs_len, fftlen};
- 
-		 CufftParams params;
-		 params.rank = rank;
-		 params.n[0] = fftlen;
-		 params.inembed[0] = ws_len;
-		 params.inembed[1] = zs_len;
-		 params.inembed[2] = fftlen;
-		 params.onembed[0] = ws_len;
-		 params.onembed[1] = zs_len;
-		 params.onembed[2] = fftlen;
-		 params.istride = istride;
-		 params.ostride = ostride;
-		 params.idist = fftlen;
-		 params.odist = fftlen;
-		 params.batch = ws_len * zs_len;
- 
-		 if (!find_in_cache(&params, &cu_plan))
-		 {
-			 CHECK_CUFFT_ERRORS(cufftPlanMany(&cu_plan, rank, n, inembed, istride, idist, onembed, ostride, odist, CUFFT_C2C, ws_len * zs_len));
-			 add_to_cache(&params, cu_plan);
-		 }
-		 cu_plan_array[b] = cu_plan;
-		 CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan, stream));
+
+	 int total_batches = 0;
+	 // Check if all the ffts are the same size
+	 for (int b = 0 ; b < batch_size ; ++b) {
+
+		total_batches += ffdot_array[b].numws * ffdot_array[b].numzs;
+
+		if (ffdot_array[b].numws != ws_len_global || ffdot_array[b].numzs != zs_len_global) {
+			printf("do_fft_batch(): Size mismatch inside a batch\n");
+		}
 	 }
 
+	 cufftHandle cu_plan_main, cu_plan_leftover;
+	 cufftHandle *cu_plan_array;
+
+	 int num_batches, remaining_size;
+
+	 int wisdom_batch_size = search_cufft_wisdom(fftlen);
+
+	 if (wisdom_batch_size) 
+	 {
+		if (total_batches <= (int) (1.1f * wisdom_batch_size)) 
+		{
+			//printf("All FFTs at once\n");
+			// Do all the ffts in a single batch
+			
+			int rank = 1;
+			int n[1] = {fftlen};
+			int istride = 1, idist = fftlen;
+			int ostride = 1, odist = fftlen;
+			int inembed_main[2] = {total_batches, fftlen};
+			int onembed_main[2] = {total_batches, fftlen};
+
+			CufftParams params;
+			params.rank = rank;
+			params.n[0] = fftlen;
+			params.inembed[0] = total_batches;
+			params.inembed[1] = fftlen;
+			params.onembed[0] = total_batches;
+			params.onembed[1] = fftlen;
+			params.istride = istride;
+			params.ostride = ostride;
+			params.idist = fftlen;
+			params.odist = fftlen;
+			params.batch = total_batches;
+
+			// Check if not in cache and add it
+			if (!find_in_cache(&params, &cu_plan_main))
+			{
+				CHECK_CUFFT_ERRORS(cufftPlanMany(&cu_plan_main, rank, n, inembed_main,
+                                           istride, idist, onembed_main, ostride,
+                                           odist, CUFFT_C2C, total_batches));
+				add_to_cache(&params, cu_plan_main);
+			}
+
+			CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan_main, stream));
+		}
+		else 
+		{
+			//printf("Splitting the ffts\n");
+			num_batches = total_batches / wisdom_batch_size;
+			remaining_size = total_batches % wisdom_batch_size;
+
+			int rank = 1;
+			int n[1] = {fftlen};
+			int istride = 1, idist = fftlen;
+			int ostride = 1, odist = fftlen;
+			int inembed_main[2] = {wisdom_batch_size, fftlen};
+			int onembed_main[2] = {wisdom_batch_size, fftlen};
+
+			int inembed_leftover[2] = {remaining_size, fftlen};
+			int onembed_leftover[2] = {remaining_size, fftlen};
+
+			CufftParams params, params_leftover;
+
+			params.rank = rank;
+			params.n[0] = fftlen;
+			params.inembed[0] = wisdom_batch_size;
+			params.inembed[1] = fftlen;
+			params.onembed[0] = wisdom_batch_size;
+			params.onembed[1] = fftlen;
+			params.istride = istride;
+			params.ostride = ostride;
+			params.idist = fftlen;
+			params.odist = fftlen;
+			params.batch = wisdom_batch_size;
+
+			params_leftover.rank = rank;
+			params_leftover.n[0] = fftlen;
+			params_leftover.inembed[0] = remaining_size;
+			params_leftover.inembed[1] = fftlen;
+			params_leftover.onembed[0] = remaining_size;
+			params_leftover.onembed[1] = fftlen;
+			params_leftover.istride = istride;
+			params_leftover.ostride = ostride;
+			params_leftover.idist = fftlen;
+			params_leftover.odist = fftlen;
+			params_leftover.batch = remaining_size;
+
+			if (!find_in_cache(&params, &cu_plan_main))
+			{
+				CHECK_CUFFT_ERRORS(cufftPlanMany(&cu_plan_main, rank, n, inembed_main,
+                                           istride, idist, onembed_main, ostride,
+                                           odist, CUFFT_C2C, wisdom_batch_size));
+				add_to_cache(&params, cu_plan_main);
+			}
+			
+			if (!find_in_cache(&params_leftover, &cu_plan_leftover))
+			{
+				CHECK_CUFFT_ERRORS(cufftPlanMany(
+					&cu_plan_leftover, rank, n, inembed_leftover, istride, idist,
+					onembed_leftover, ostride, odist, CUFFT_C2C, remaining_size));
+				add_to_cache(&params_leftover, cu_plan_leftover);
+			}
+
+      CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan_main, stream));
+
+			CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan_leftover, stream));
+
+		}
+	 }
+	 else 
+	 {
+		//printf("No wisdom found! running the default cufft code\n");
+
+		cu_plan_array = (cufftHandle *)malloc(batch_size * sizeof(cufftHandle));
+ 
+		// 1. handle operations before the pre_fft_kernel call, prepare cu_plan
+		for (int b = 0; b < batch_size; b++)
+		{
+			ffdotpows_cu *ffdot = &ffdot_array[b];
+			//const float norm = 1.0 / (fftlen * fftlen);
+			const int offset = binoffset * ACCEL_NUMBETWEEN;
+			int ws_len = ffdot->numws;
+			int zs_len = ffdot->numzs;
+			int rs_len = ffdot->numrs;
+	
+			size_t full_size = ws_len * zs_len;
+	
+			cufftHandle cu_plan;
+			int rank = 1;
+			int n[1] = {fftlen};
+			int istride = 1, idist = fftlen;
+			int ostride = 1, odist = fftlen;
+			int inembed[3] = {ws_len, zs_len, fftlen};
+			int onembed[3] = {ws_len, zs_len, fftlen};
+	
+			CufftParams params;
+			params.rank = rank;
+			params.n[0] = fftlen;
+			params.inembed[0] = ws_len;
+			params.inembed[1] = zs_len;
+			params.inembed[2] = fftlen;
+			params.onembed[0] = ws_len;
+			params.onembed[1] = zs_len;
+			params.onembed[2] = fftlen;
+			params.istride = istride;
+			params.ostride = ostride;
+			params.idist = fftlen;
+			params.odist = fftlen;
+			params.batch = ws_len * zs_len;
+	
+			if (!find_in_cache(&params, &cu_plan))
+			{
+				CHECK_CUFFT_ERRORS(cufftPlanMany(&cu_plan, rank, n, inembed, istride, idist, onembed, ostride, odist, CUFFT_C2C, ws_len * zs_len));
+				add_to_cache(&params, cu_plan);
+			}
+			cu_plan_array[b] = cu_plan;
+			CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan, stream));
+		}
+	 }
+	 
 	 #define COMPLEXPERTHREAD2
  
 	 // 2. run pre_fft_kernel
@@ -1374,14 +1511,54 @@
 	 }
  
 	 CUDA_CHECK(cudaGetLastError());
- 
-	 // 3. run cufftExecC2C
-	 for (int b = 0; b < batch_size; b++)
+
+	 if (wisdom_batch_size) 
 	 {
-		 fcomplex *full_tmpdat = &full_tmpdat_array[b * (fftlen * ws_len_global * zs_len_global)];
-		 fcomplex *full_tmpout = &full_tmpout_array[b * (fftlen * ws_len_global * zs_len_global)];
- 
-		 CHECK_CUFFT_ERRORS(cufftExecC2C(cu_plan_array[b], (cufftComplex *)full_tmpdat, (cufftComplex *)full_tmpout, CUFFT_INVERSE));
+		if (total_batches <= (int) (1.1f * wisdom_batch_size)) 
+		{
+			fcomplex *full_tmpdat =
+						&full_tmpdat_array[0];
+
+			CHECK_CUFFT_ERRORS(
+						cufftExecC2C(cu_plan_main, (cufftComplex *)full_tmpdat,
+													(cufftComplex *)full_tmpdat, CUFFT_INVERSE));
+		}
+		else 
+		{
+			for (int b = 0; b < num_batches; b++)
+			{
+				fcomplex *full_tmpdat =
+						&full_tmpdat_array[b * (fftlen * wisdom_batch_size)];
+
+				CHECK_CUFFT_ERRORS(
+						cufftExecC2C(cu_plan_main, (cufftComplex *)full_tmpdat,
+													(cufftComplex *)full_tmpdat, CUFFT_INVERSE));
+			}
+
+			if (remaining_size > 0)
+			{
+				fcomplex *full_tmpdat =
+						&full_tmpdat_array[num_batches * (fftlen * wisdom_batch_size)];
+
+				CHECK_CUFFT_ERRORS(
+						cufftExecC2C(cu_plan_leftover, (cufftComplex *)full_tmpdat,
+													(cufftComplex *)full_tmpdat, CUFFT_INVERSE));
+			}
+
+		}
+	 }
+	 else 
+	 {
+		// 3. run cufftExecC2C
+		for (int b = 0; b < batch_size; b++)
+		{
+			fcomplex *full_tmpdat = &full_tmpdat_array[b * (fftlen * ws_len_global * zs_len_global)];
+			fcomplex *full_tmpout = &full_tmpout_array[b * (fftlen * ws_len_global * zs_len_global)];
+	
+			CHECK_CUFFT_ERRORS(cufftExecC2C(cu_plan_array[b], (cufftComplex *)full_tmpdat, (cufftComplex *)full_tmpout, CUFFT_INVERSE));
+		}
+
+		free(cu_plan_array);
 	 }
  
 	 CUDA_CHECK(cudaGetLastError());
@@ -1424,7 +1601,6 @@
 	 CUDA_CHECK(cudaGetLastError());
  
 	 // Release the allocated resources
-	 free(cu_plan_array);
 	 free(rs_len_array);
 	 cudaFreeAsync(idx_array_device, stream);
 	 cudaFreeAsync(rs_len_array_device, stream);

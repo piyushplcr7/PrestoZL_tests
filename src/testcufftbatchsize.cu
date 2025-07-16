@@ -66,8 +66,10 @@ extern "C"
     CUDA_CHECK(cudaEventCreate(&begin_ffts));
     CUDA_CHECK(cudaEventCreate(&end_ffts));
 
+    // Going over all harmonic stages
     for (int stage = 0; stage < stages; ++stage)
     {
+      // Going over all harmonic fractions
       int harmtosum = 1 << stage;
       for (int jj = 1; jj < harmtosum; jj += 2)
       {

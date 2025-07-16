@@ -22,6 +22,7 @@
 #include <math.h>
 #include <assert.h>
 #include <time.h>
+#include "cufftwisdomdefs.h"
 //#include "cufft_optimal_size.h"
 /*#undef USEMMAP*/
 
@@ -485,8 +486,39 @@ void accelsearch_CPU1(int argc, char *argv[], subharminfo ***subharminfs_ptr, ac
     }
 }
 
+void load_cufft_wisdom() {
+    FILE* cufft_wisdom_file;
+
+    char wisdompath[256];
+    snprintf(wisdompath, sizeof(wisdompath), "%s/lib/cufft_wisdom.txt", getenv("PRESTO"));
+
+    cufft_wisdom_file = fopen(wisdompath, "r");
+
+    if (!cufft_wisdom_file) {
+        perror("Failed to open cufft wisdom file");
+        printf("Error in reading file!\n");
+        exit(1);
+        //return EXIT_FAILURE;
+    }
+
+    char buffer[256];
+
+    int fftlen, batchsize;
+
+    while (fgets(buffer, sizeof(buffer), cufft_wisdom_file)) {
+        if (sscanf(buffer, "fftlen: %d, batchsize: %d", &fftlen, &batchsize) == 2) {
+            cufftwisdomarray[cufftwisdomarraysize].fftlen = fftlen;
+            cufftwisdomarray[cufftwisdomarraysize].batch_size = batchsize;
+            cufftwisdomarraysize++;
+        }
+    }
+}
+
 int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr, Cmdline *cmd)
 {
+    load_cufft_wisdom();
+    printf("wisdom array size after reading: %d\n", cufftwisdomarraysize);
+    //exit(1);
     int max_threads = omp_get_max_threads();
     printf("Max threads (inside accelsearch_gpu): %d\n", max_threads);
     int ii, rstep;
