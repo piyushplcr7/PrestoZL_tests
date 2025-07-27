@@ -23,6 +23,7 @@
 #include <assert.h>
 #include <time.h>
 #include "cufftwisdomdefs.h"
+#include "globaldefs.h"
 //#include "cufft_optimal_size.h"
 /*#undef USEMMAP*/
 
@@ -37,6 +38,8 @@
 #include "cuda_runtime.h"
 #include "cuda_helper.h"
 #include <nvtx3/nvToolsExt.h>
+
+float* powers_dev_batch;
 
 // Use OpenMP
 #ifdef _OPENMP
@@ -56,25 +59,7 @@ void free_ffdotpows_cu_batch(ffdotpows_cu *ffd_array, int batch_size,
                              cudaStream_t sub_stream);
 
 // Structures to store multiple subharmonics
-typedef struct
-{
-    int harm_fract;
-    int subharmonic_wlo;
-    unsigned short *subharmonic_zinds;
-    unsigned short *subharmonic_rinds;
-    float *subharmonic_powers;
-    int subharmonic_numzs;
-    int subharmonic_numrs;
-} SubharmonicMap;
-
 subharminfo **create_subharminfos_cu(accelobs *obs);
-
-typedef struct
-{
-    long long index;
-    float pow;
-    float sig;
-} SearchValue;
 
 void fuse_add_search_batch(ffdotpows_cu *fundamentals,
                            SubharmonicMap *subhmap,
@@ -518,7 +503,9 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 {
     load_cufft_wisdom();
     printf("wisdom array size after reading: %d\n", cufftwisdomarraysize);
-    //exit(1);
+
+    int proper_batch_size = proper_batch_size_global;
+
     int max_threads = omp_get_max_threads();
     printf("Max threads (inside accelsearch_gpu): %d\n", max_threads);
     int ii, rstep;
@@ -631,7 +618,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         offset_array[ii] = (int *)malloc(jj * sizeof(int));
     }
 
-    printf("test\n");
     clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     cudaEventRecord(start,0);
     fkern_gpu = fkern_host_to_dev(subharminfs, obs.numharmstages, offset_array);
@@ -722,14 +708,15 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         printf("Map size = %d\n", map_size);
         for (int i = 0; i < map_size; i++)
         {
-            printf("harmonic %d/%d: %d X %d FFTs \n", map[i].key.harm, map[i].key.harmtosum, map[i].value.shi->numkern_wdim * map[i].value.shi->numkern_zdim, map[i].value.shi->kern[0][0].fftlen);
+            //printf("harmonic %d/%d: %d X %d FFTs \n", map[i].key.harm, map[i].key.harmtosum, map[i].value.shi->numkern_wdim * map[i].value.shi->numkern_zdim, map[i].value.shi->kern[0][0].fftlen);
             fft_len_max = MAX(map[i].value.shi->kern[0][0].fftlen, fft_len_max);
             zs_len_max = MAX(map[i].value.shi->numkern_zdim, zs_len_max);
             ws_len_max = MAX(map[i].value.shi->numkern_wdim, ws_len_max);
             batch_size_max = MAX(map[i].value.count, batch_size_max);
         }
         printf("batch_size_max = %d\n", batch_size_max);
-        int proper_batch_size = MIN(cmd->batchsize, batch_size_max);
+        printf("fft_len_max = %d, fundamental kernel size = %d\n", fft_len_max, shii->kern[0][0].fftlen);
+        //int proper_batch_size = MIN(cmd->batchsize, batch_size_max);
 
     /*     //float** pinned_mem_pointers = (float**) malloc(sizeof(float*) * max_map_size);
 
@@ -760,17 +747,24 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
         // Added on the main stream as this is required on the upcoming operation on the main stream: subharm_fderivs_vol_cu. This could
         // possibly be improved using cuda events and waiting for the event to finish using cudaStreamWaitEvent(target_stream, event, flags)
+        //size_t absorbout = printGPUUsage();
         CUDA_CHECK(cudaMallocAsync(&full_tmpdat_array, array_size, main_stream)); // Allocate an array of pointers on the device
+        //CUDA_CHECK(cudaStreamSynchronize(main_stream));
+        printf("GPU Mem alloc size (full_tmpdat_array): %f GB\n", (double)array_size/(1<<30));
 
-        printf("Full tmpdat array can hold: %d X %d FFTs\n", ws_len_max * zs_len_max, fft_len_max);
-        printf("Fundamental subharmonic info: %d X %d FFTs\n", subharminfs[0][0].numkern, subharminfs[0][0].kern[0][0].fftlen);
+        //printf("Full tmpdat array can hold: %d X %d FFTs\n", ws_len_max * zs_len_max, fft_len_max);
+        //printf("Fundamental subharmonic info: %d X %d FFTs\n", subharminfs[0][0].numkern, subharminfs[0][0].kern[0][0].fftlen);
 
         //fcomplex* full_tmpdat_array_cpu = malloc(array_size);
         //testcufftbatchsize(proper_batch_size, full_tmpdat_array, subharminfs, obs.numharmstages);
         //exit(1);
 
+        //absorbout = printGPUUsage();
         SubharmonicMap *subharmonics_add;
+        //printf("GPU Mem alloc size (subharmonics_add): %f GB\n", (1 << (obs.numharmstages - 1)) * (double)proper_batch_size * sizeof(SubharmonicMap)/(1<<30));
         CUDA_CHECK(cudaMallocAsync(&subharmonics_add, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), main_stream));
+        //CUDA_CHECK(cudaStreamSynchronize(main_stream));
+        //absorbout = printGPUUsage();
         SubharmonicMap *subharmonics_add_host = (SubharmonicMap *)malloc((1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap));
 
         SearchValue *search_results_base;
@@ -791,9 +785,15 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         nvtxRangePop();
         CUDA_CHECK(cudaMemset(d_too_large, 0, sizeof(int)));
 
+        //absorbout = printGPUUsage();
         nvtxRangePush("cuda malloc async search_results_base ");
         CUDA_CHECK(cudaMallocAsync(&search_results_base, search_results_size, sub_stream));
         nvtxRangePop();
+        //CUDA_CHECK(cudaStreamSynchronize(sub_stream));
+        //printf("Allocating search results base with size %f GB\n", (double)search_results_size/(1<<30));
+        //absorbout = printGPUUsage();
+
+        //printf("GPU Mem alloc size (search_results): %ld\n", search_results_size);
         SearchValue *search_results = search_results_base;
 
         unsigned long long int *search_nums;
@@ -802,12 +802,19 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
         size_t search_nums_host = 0;
 
+        
         // Allocating pdata_dev earlier for the maximum possible size
         // and reusing it inside subharm_fderivs_vol_cu
+        
+        //absorbout = printGPUUsage();
         fcomplex *pdata_dev;
         CUDA_CHECK(cudaMallocAsync(&pdata_dev, 
                                    (size_t)(sizeof(fcomplex) * fft_len_max * proper_batch_size), 
                                    main_stream));
+
+        //printf("Allocating pdata dev with size %f GB\n", (double)fft_len_max * proper_batch_size * sizeof(fcomplex)/(1<<30));
+        
+        //absorbout = printGPUUsage();
 
         // Allocating pinned memory for rinds and zinds that will be reused
         unsigned short* rinds_all;
@@ -827,35 +834,21 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             CUDA_CHECK(cudaEventCreate(&rzinds_copy_finished_array[i]));
             rinds_all_master[i] = rinds_all + i * obs.corr_uselen * proper_batch_size * 2;
         }
-        //exit(1);
 
-        cudaEvent_t fasb_start, fasb_end;
-        CUDA_CHECK(cudaEventCreate(&fasb_start));
-        CUDA_CHECK(cudaEventCreate(&fasb_end));
         // TODO: destroy event and stream!
         cudaEvent_t rzinds_copy_finished;
         CUDA_CHECK(cudaEventCreate(&rzinds_copy_finished));
         cudaStream_t some_stream;
         CUDA_CHECK(cudaStreamCreate(&some_stream));
 
+        // Buffer that can hold proper batch size ffts of largest size
         fcomplex* pdata_all;
-        CUDA_CHECK(cudaMallocHost((void **)&pdata_all, 
-                                (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size));
-        allocated_pinned_memory += (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size/bytes_in_GB;
-
-        //float* pinned_powers_buffer;
-        size_t pinned_powers_max_size = (size_t)sizeof(float) * fft_len_max * subharminfs[0][0].numkern * proper_batch_size;
-
-        printf("Allocated pinned memory: %f GB\n", allocated_pinned_memory);
-
         size_t pdata_all_size = (size_t)sizeof(fcomplex) * fft_len_max * proper_batch_size;
-        printf("size of pdata_all = %f (KB)\n", (double)pdata_all_size/1024);
-
-        float* fused_powers_buffer = malloc(pinned_powers_max_size);
-
-        printf("Pinned powers max size = %ld bytes or %f GB\n", pinned_powers_max_size, (double)pinned_powers_max_size/bytes_in_GB);
-
-        double powers_size = 0;
+        CUDA_CHECK(cudaMallocHost((void **)&pdata_all, pdata_all_size));        
+        
+        allocated_pinned_memory += pdata_all_size/bytes_in_GB;
+        //printf("Allocated pinned memory: %f GB\n", allocated_pinned_memory);
+        //printf("size of pdata_all = %f (KB)\n", (double)pdata_all_size/1024);
 
         // TODO: destroy event and stream!
         cudaEvent_t pdata_copy_finished;
@@ -881,6 +874,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             //printf("batch_size = %d\n", batch_size);
             for (int j = 0; j < batch_size; j += proper_batch_size)
             {
+                powers_len_total = 0;
                 current_batch++;
                 int current_batch_size = proper_batch_size < batch_size - j ? proper_batch_size : batch_size - j;
                 //zinds_all = rinds_all + obs.corr_uselen * current_batch_size;
@@ -888,6 +882,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                 ffdotpows_cu *fundamentals = malloc(current_batch_size * sizeof(ffdotpows_cu));
                 double *startr_array = map[0].value.startr_array;
                 double *lastr_array = map[0].value.lastr_array;
+
+                powers_dev_batch = powers_dev_batch_all;
 
                 size_t powers_len_fund = subharm_fderivs_vol_cu_batch(
                     fundamentals,
@@ -912,13 +908,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     pdata_copy_finished,
                     pdata_stream);
 
-                /* if (j == 0) {
-                    powers_size += powers_len_fund * sizeof(float) / bytes_in_GB;
-                    printf("fund powers size = %f GB\n", powers_len_fund * sizeof(float)/bytes_in_GB);
-                } */
-                // Copy powers to the pinned buffer
-                //CUDA_CHECK(cudaMemcpyAsync(subharminfs[0][0].powers, fundamentals->powers, powers_len_fund * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
-                // Assign some event to the finish of the above copy
+                powers_dev_batch += powers_len_fund;
 
                 for (int ib = 0; ib < current_batch_size; ib++)
                 {
@@ -927,12 +917,15 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
                 // Going over the sub harmonics
                 int kk = 0, num_expand = 0;
+
+                //size_t subharm_inds_size = 0;
                 for (stage = 1; stage < obs.numharmstages; stage++)
                 {
                     harmtosum = 1 << stage;
                     num_expand += harmtosum / 2;
                     for (harm = 1; harm < harmtosum; harm += 2)
                     {
+                        //subharm_inds_size += (size_t)(obs.corr_uselen * sizeof(unsigned short) * batch_size * 2);
                         //printf("current batch size: %d, harm fract = %d/%d\n", current_batch_size ,harm, harmtosum);
                         // prepare batch
                         MapKey k = {harmtosum, harm};
@@ -975,14 +968,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                             pdata_copy_finished,
                             pdata_stream);
 
-                        /* if (j == 0) {
-                            powers_size += powers_len_subharm * sizeof(float) / bytes_in_GB;
-                            printf("subharm %d/%d powers size = %f GB\n", harm, harmtosum, powers_len_subharm * sizeof(float)/bytes_in_GB);
-                        } */
-
-                        // Copy powers to the pinned buffer
-                        //CUDA_CHECK(cudaMemcpyAsync(shi_local->powers, subharmonics_batch->powers, powers_len_subharm * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
-                        //CUDA_CHECK(cudaMemcpyAsync(subharminfs[stage][harm-1].powers, subharmonics_batch[0].powers, powers_len_subharm * sizeof(float), cudaMemcpyDeviceToHost, main_stream));
+                        powers_dev_batch += powers_len_subharm;
 
                         for (int i = 0; i < current_batch_size; i++)
                         {
@@ -1002,6 +988,12 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     } // end loop odd fraction in a stage
                 } // end loop harmonic stages
 
+                /* printf("powers len total calculated inside subharm: %f GB, total_powers_size: %f GB\n", 
+                    (double)powers_len_total * sizeof(float)/(1<<30), 
+                    (double)total_powers_size_without_batchsize * proper_batch_size_global/(1<<30)); */
+                
+                
+                //printf("GPU mem alloc (subharm_inds_size) = %ld\n", subharm_inds_size);
                 /* if (j == 0) {
                     printf("powers size (fund + subharmonics) = %f GB\n", powers_size);
                 } */
@@ -1196,6 +1188,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     printf("too large exit\n");
                     free_subharmonic_cu_batch(subharmonics_add_host, current_batch_size, num_expand, sub_stream);
                     free_ffdotpows_cu_batch(fundamentals, current_batch_size, sub_stream);
+                    CUDA_CHECK(cudaFreeAsync(powers_dev_batch_all, sub_stream));
                     CUDA_CHECK(cudaFreeAsync(full_tmpdat_array, sub_stream));
                     CUDA_CHECK(cudaFreeAsync(search_results, sub_stream));
                     CUDA_CHECK(cudaFreeAsync(subharmonics_add, sub_stream));
@@ -1234,7 +1227,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     free(too_large);
                     CUDA_CHECK(cudaFreeHost(rinds_all));
                     CUDA_CHECK(cudaFreeHost(pdata_all));
-                    free(fused_powers_buffer);
                     CUDA_CHECK(cudaFreeHost(subw_host));
                     CUDA_CHECK(cudaFreeHost(powcuts_host));
                     CUDA_CHECK(cudaFreeHost(numharms_host));
@@ -1305,6 +1297,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             // Free the pinned memory for rinds and zinds
             CUDA_CHECK(cudaFreeHost(rinds_all));
             CUDA_CHECK(cudaFreeHost(pdata_all));
+            CUDA_CHECK(cudaFreeAsync(powers_dev_batch_all, sub_stream));
 
             //CUDA_CHECK(cudaFreeHost(subharminfs[0][0].powers));
             // free pinnned powers arrays 
@@ -1317,7 +1310,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                 }
                 CUDA_CHECK(cudaFreeHost(map[map_idx].powers));
             } */
-            free(fused_powers_buffer);
             
             cudaStreamSynchronize(main_stream);
             unsigned long long int *search_nums_host = (unsigned long long int *)malloc(sizeof(unsigned long long int));

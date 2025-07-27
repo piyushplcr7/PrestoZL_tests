@@ -25,8 +25,11 @@
 #include <time.h>
 #include <stdbool.h>
 #include <nvtx3/nvToolsExt.h>
+#include "globaldefs.h"
 
 #define NEAREST_INT(x) (int)(x < 0 ? x - 0.5 : x + 0.5)
+
+size_t powers_len_total = 0;
 
 void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
     fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream);
@@ -47,15 +50,15 @@ void free_inds_array()
     free(inds_array);
 }
 
-typedef struct
+/* typedef struct
 {
     long long index;
     float pow;
     float sig;
-} SearchValue;
+} SearchValue; */
 
 // Structures to store multiple subharmonics
-typedef struct
+/* typedef struct
 {
     int harm_fract;
     int subharmonic_wlo;
@@ -64,7 +67,7 @@ typedef struct
     float *subharmonic_powers;
     int subharmonic_numzs;
     int subharmonic_numrs;
-} SubharmonicMap;
+} SubharmonicMap; */
 
 // Comparison function for comparing the index field of two SearchValue structures
 int compare(const void *a, const void *b)
@@ -261,7 +264,7 @@ void free_ffdotpows_cu(ffdotpows *ffd,
 void free_ffdotpows_cu_batch(ffdotpows_cu *ffd_array, int batch_size,
                              cudaStream_t sub_stream)
 {
-    CUDA_CHECK(cudaFreeAsync(ffd_array[0].powers, sub_stream));
+    //CUDA_CHECK(cudaFreeAsync(ffd_array[0].powers, sub_stream));
     free(ffd_array);
 }
 
@@ -271,7 +274,7 @@ void free_subharmonic_cu_batch(SubharmonicMap *ffd_array, int batch_size, int nu
     for (int i = 0; i < num_expand; i++)
     {
         SubharmonicMap *ffd = &ffd_array[i * batch_size];
-        CUDA_CHECK(cudaFreeAsync(ffd->subharmonic_powers, sub_stream));
+        //CUDA_CHECK(cudaFreeAsync(ffd->subharmonic_powers, sub_stream));
         CUDA_CHECK(cudaFreeAsync(inds_array[i], sub_stream));
     }
 }
@@ -639,9 +642,12 @@ fcomplex *fkern_host_to_dev(subharminfo **subharminfs, int numharmstages, int **
 
     /* clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     CUDA_CHECK(cudaEventRecord(start,0)); */
+    //size_t absorbout = printGPUUsage();
     CUDA_CHECK(cudaMalloc((void **)&fkern_gpu, sizeof(fcomplex) * fkern_size));
     double bytes_in_GB = (double)(1<<30);
-    printf("size of all kernels = %f GB\n", sizeof(fcomplex) * fkern_size/bytes_in_GB); 
+    //printf("GPU mem alloc (fkern size): %ld\n", fkern_size * sizeof(fcomplex));
+    printf("size of all kernels on GPU = %f GB\n", sizeof(fcomplex) * fkern_size/bytes_in_GB);
+    //absorbout = printGPUUsage(); 
     /* CUDA_CHECK(cudaEventRecord(stop,0));
     CUDA_CHECK(cudaEventSynchronize(stop));
     CUDA_CHECK(cudaEventElapsedTime(&elapsed, start, stop)); */
@@ -744,11 +750,12 @@ size_t subharm_fderivs_vol_cu_batch(
     }
 
     // Create a common FFTW plan to be executed by all the threads
-    fftwf_complex *dummy = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftlen);
+    fftwf_complex* dummy;
+    /* fftwf_complex *dummy = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftlen);
     if (!dummy) {
         fprintf(stderr, "Failed to allocate dummy buffer\n");
         exit(1);
-    }
+    } */
 
     // Create a single shared FFTW plan (1D, forward transform, in-place)
     fftwf_plan shared_plan = fftwf_plan_dft_1d(
@@ -1112,10 +1119,25 @@ size_t subharm_fderivs_vol_cu_batch(
         exit(1);
     } */
 
-    float *powers_dev_batch;
-    nvtxRangePush("malloc powers_dev_batch ");
-    CUDA_CHECK(cudaMallocAsync(&powers_dev_batch, (size_t)(powers_len * sizeof(float)), stream));
-    nvtxRangePop();
+    /* printf("Inside subharm fderivs (%d/%d): numzsXws %d, numrs %d, powers_len = %d\n", 
+        harmnum, numharm, ffdot_array[0].numws * ffdot_array[0].numzs, ffdot_array[0].numrs, powers_len * sizeof(float)); */
+    //printf("Before alloc, powers_len = %ld\n", powers_len);
+    powers_len_total += powers_len;
+
+    //printf("Usage before allocation in subharm_fderivs\n");
+    //size_t freeMem = printGPUUsage();
+
+   //float *powers_dev_batch;
+   //nvtxRangePush("malloc powers_dev_batch ");
+   //CUDA_CHECK(cudaMallocAsync(&powers_dev_batch, (size_t)(powers_len * sizeof(float)), stream));
+   //nvtxRangePop();
+   //CUDA_CHECK(cudaStreamSynchronize(stream));
+   
+   //printf("Usage after allocation of %f GB\n", (double)powers_len * sizeof(float) / (1<<30));
+   //freeMem = printGPUUsage();
+
+   //printf("\n");
+
     // TODO Free powers_dev_batch
     int idx = 0;
     int *idx_array = (int *)malloc(batch_size * sizeof(int));
@@ -1133,7 +1155,6 @@ size_t subharm_fderivs_vol_cu_batch(
         idx_array[b] = idx;
         idx += ffdot->numws * ffdot->numzs * ffdot->numrs;
     }
-    //printf("\n");
 
     // Make GPU wait for pdata copy to be finished before running the kernels
     #ifdef PINNED_PDATA_ALL
@@ -1142,10 +1163,6 @@ size_t subharm_fderivs_vol_cu_batch(
     do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream);
     //CUDA_CHECK(cudaFreeAsync(pdata_dev, stream));
     
-    // Destroy the texture object
-    //CUDA_CHECK(cudaDestroyTextureObject(texObj));
-    //CUDA_CHECK(cudaFreeArray(cuArray));
-
     free(idx_array);
     return powers_len;
 }
