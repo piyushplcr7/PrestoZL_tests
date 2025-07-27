@@ -1,3 +1,6 @@
+#ifndef PRESTOH
+#define PRESTOH
+
 #include <sys/times.h>
 #include "chkio.h"
 #include <math.h>
@@ -374,6 +377,21 @@ fcomplex *gen_z_response(double roffset, int numbetween, double z, \
 
 fcomplex *gen_w_response(double roffset, int numbetween, double z, \
                          double w, int numkern);
+  /*  Generate the response function for Fourier f-dot interpolation.  */
+  /*  Arguments:                                                       */
+  /*    'roffset' is the offset in Fourier bins for the full response  */
+  /*       (i.e. At this point, the response would equal 1.0)          */
+  /*    'numbetween' is the number of points to interpolate between    */
+  /*       each standard FFT bin.  (i.e. 'numbetween' = 1 = interbins) */
+  /*    'z' is the average Fourier Frequency derivative (# of bins     */
+  /*       the signal smears over during the observation).             */
+  /*    'w' is the Fourier Frequency 2nd derivative (change in the     */
+  /*       Fourier f-dot during the observation).                      */
+  /*    'numkern' is the number of complex points that the kernel will */
+  /*       contain.                                                    */
+
+  fcomplex *gen_w_response_modified(double roffset, int numbetween, double z, \
+                         double w, int numkern, int max_w_resp_halfwidth, fftwf_plan inner_plan);
   /*  Generate the response function for Fourier f-dot interpolation.  */
   /*  Arguments:                                                       */
   /*    'roffset' is the offset in Fourier bins for the full response  */
@@ -1546,5 +1564,5 @@ fcomplex *atwood_search(double *events, double *weights,
 /*    Nwin:  number of bins that make up a "window" (the FFT len)  */
 /*    dt:  the time duration to use for the binning                */
 
-
+#endif
 

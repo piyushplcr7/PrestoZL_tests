@@ -257,11 +257,20 @@ accelsearch: accelsearch_cmd.o accel_utils.o accelsearch.o zapping.o libpresto
 accel_kernels.o: accel_kernels.cu 
 	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_INC_PATH) $(GENCODE_FLAGS) $(GLIBINC) -c $< 
 
+testcufftbatchsize.o: testcufftbatchsize.cu 
+	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_INC_PATH) $(GENCODE_FLAGS) $(GLIBINC) -c $< 
+
+cufft_wisdom: cufft_wisdom.cu 
+	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_LINK_EXTRA_FLAGS) $(CUDA_INC_PATH) $(GENCODE_FLAGS) -o $(PRESTO)/bin/$@ $<
+	$(PRESTO)/bin/cufft_wisdom
+
 # accelsearch_cu: accelsearch_cmd.o accel_utils.o accel_kernels.o zapping.o libpresto accel_utils_cu.o accelsearch_cu.o
 # 	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@ accelsearch_cmd.o accel_utils.o accel_utils_cu.o accelsearch_cu.o zapping.o accel_kernels.o -lcufft $(PRESTOLINK) $(GLIBLINK) -lm $(CUDA_LINK_EXTRA_FLAGS)
 
-libaccelsearch_lib.so: accelsearch_cmd.o accel_utils.o accel_kernels.o zapping.o libpresto accel_utils_cu.o accelsearch_lib.c
-	$(CC) $(CFLAGS) -shared $(CLINKFLAGS) -o $(PRESTO)/lib/$@ accelsearch_cmd.o accel_utils.o accel_utils_cu.o accelsearch_lib.c zapping.o accel_kernels.o -lcufft $(PRESTOLINK) $(GLIBLINK) -lm $(CUDA_LINK_EXTRA_FLAGS)
+#-I $(CUDA_PATH)/include
+
+libaccelsearch_lib.so: testcufftbatchsize.o accelsearch_cmd.o accel_utils.o accel_kernels.o zapping.o libpresto accel_utils_cu.o accelsearch_lib.c
+	$(CC) $(CFLAGS) $(FFTINC) -shared $(CLINKFLAGS) -o $(PRESTO)/lib/$@ testcufftbatchsize.o accelsearch_cmd.o accel_utils.o accel_utils_cu.o accelsearch_lib.c zapping.o accel_kernels.o -lcufft $(PRESTOLINK) $(GLIBLINK) $(FFTLINK) -lm $(CUDA_LINK_EXTRA_FLAGS)
 
 libaccelsearch_maxsize.so: accelsearch_maxsize.c
 	$(CC) -shared -fPIC -o $(PRESTO)/lib/libaccelsearch_maxsize.so accelsearch_maxsize.c -lm -lcudart `pkg-config --cflags --libs glib-2.0` -I/usr/local/cuda/include -L/usr/local/cuda/lib64

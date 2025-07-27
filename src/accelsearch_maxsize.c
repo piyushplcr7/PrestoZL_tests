@@ -261,9 +261,9 @@ int fftlen_from_kernwidth(int kernwidth)
         return next2_to_n(kernwidth * 5);
 }
 
-int next_good_fftlen(int N)
 /* Return one of the shortest, yet best performing, FFT lengths larger
- * than N.  This assumes FFTW. */
+* than N.  This assumes FFTW. */
+/* int next_good_fftlen(int N)
 {
     int fftlens[17] = {128, 192, 256, 384, 512, 768, 1024, 1280, 2048, 4096,
                        5120, 7680, 10240, 12288, 15360, 16384, 25600};
@@ -275,7 +275,34 @@ int next_good_fftlen(int N)
     while (N > fftlens[ii])
         ii++;
     return fftlens[ii];
-}
+} */
+
+/* Return one of the shortest, yet best performing, FFT lengths larger
+* than N.  This assumes FFTW. */
+/* int next_good_fftlen(int N)
+{
+    int fftlens[10] = {
+        128,   // 2^7
+        256,   // 2^8
+        512,   // 2^9
+        1024,  // 2^10
+        2048,  // 2^11
+        4096,  // 2^12
+        8192,  // 2^13
+        16384, // 2^14
+        32768, // 2^15
+        65536  // 2^16
+    };
+
+    int ii = 0;
+    if (N <= fftlens[0])
+        return fftlens[0];
+    if (N > fftlens[9])
+        return next2_to_n(N);
+    while (N > fftlens[ii])
+        ii++;
+    return fftlens[ii];
+} */
 
 /* Return x such that 2**x = n */
 static inline int twon_to_index(int n)
