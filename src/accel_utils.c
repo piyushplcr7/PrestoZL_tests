@@ -541,13 +541,13 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     int proper_batch_size = proper_batch_size_global;
     //total_powers_size = proper_batch_size * total_powers_size_without_batchsize;
 
-    printf("Calculating GPU Memory Usage\n");
+    /* printf("Calculating GPU Memory Usage\n");
 
     while (calculateGPUMemUsage(shis, *obs, proper_batch_size, false) < 0.98 * freeMem) {
         proper_batch_size++;
     }
 
-    proper_batch_size_global = proper_batch_size-1;
+    proper_batch_size_global = proper_batch_size-1; */
 
     size_t gpuUsage = calculateGPUMemUsage(shis, *obs, proper_batch_size_global, true);
     printf("GPU mem usage: %ld bytes or %f GB\n", gpuUsage, (double)gpuUsage/(1<<30));

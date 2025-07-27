@@ -1224,26 +1224,36 @@
  __global__ void after_fft_kernel_batch(float *powers, fcomplex *full_tmpout_array, int offset, float norm, int ws_len, int zs_len, int *rs_len_array, int fftlen, int *idx_array, int max_rs_len)
  {
 	 int b = blockIdx.x / ws_len;
+	 int rs_len = rs_len_array[b];
+	 int idx_array_b = idx_array[b];
+	 float* powers_b = &powers[idx_array[b]];
+	 
 	 int ii = blockIdx.x % ws_len;
 	 int linear_index = blockIdx.y * blockDim.x + threadIdx.x;
 	 int jj = linear_index / (max_rs_len);
 	 int kk = linear_index % (max_rs_len);
  
-	 int rs_len = rs_len_array[b];
  
 	 if (jj < zs_len && kk < rs_len)
 	 {
-		 fcomplex *full_tmpout = &full_tmpout_array[b * (fftlen * ws_len * zs_len)];
-		 fcomplex *output = &full_tmpout[calc_index_dev(ii, jj, ws_len, zs_len, fftlen)];
- 
+		 /* fcomplex *full_tmpout = &full_tmpout_array[b * (fftlen * ws_len * zs_len)];
+		 fcomplex *output = &full_tmpout[(jj * ws_len + ii) * fftlen]; */
+
+		 float2 *fdata_complex = (float2*) &full_tmpout_array[b * (fftlen * ws_len * zs_len) + (jj * ws_len + ii) * fftlen];
+		
+		 float2 complexval = fdata_complex[kk+offset];
 		 // Turn the good parts of the result into powers and store
 		 // them in the output matrix
-		 float *fdata = (float *)output;
-		 const int ind = 2 * (kk + offset);
+		 //float *fdata = (float *)fdata_complex;
+		 //const int ind = 2 * (kk + offset);
+		 
+		 float power = fmaf(complexval.x, complexval.x, 0.0f);
+		 power = fmaf(complexval.y, complexval.y, power);
+		 power = fmaf(power, norm, 0.0f);
+
 		 int index = matrix_3d_index(ii, jj, kk, zs_len, rs_len);
-		 powers[idx_array[b] + index] = (fdata[ind] * fdata[ind] +
-										 fdata[ind + 1] * fdata[ind + 1]) *
-										norm;
+
+		 powers_b[index] = power;
 	 }
  }
  
@@ -1472,7 +1482,7 @@
 
 	 int beta = (batch_size + alpha - 1)/ alpha;
  
-	 if (batch_size % alpha == 0) {
+	 if (batch_size % alpha == 0 && false) {
 		size_t shared_mem_size_bytes = shared_mem_size * 1024;
 
 		 cudaFuncSetAttribute(
