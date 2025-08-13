@@ -794,7 +794,11 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     shis[0] = (subharminfo *)malloc(2 * sizeof(subharminfo));
     init_subharminfo(1, 1, (int)obs->zhi, (int)obs->whi, &shis[0][0], obs, plan_to_use, shi_kernels);
 
-    total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * obs->corr_uselen * sizeof(float);
+    int current_numrs_fixed = ((obs->corr_uselen + 31)/32) * 32;
+
+    //total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * obs->corr_uselen * sizeof(float);
+    total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * current_numrs_fixed * sizeof(float);
+
     shi_kernels += (size_t)shis[0][0].numkern * obs->fftlen;
 
     /* Prep the sub-harmonics if needed */
@@ -831,7 +835,10 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
                     current_numrs = (current_numrs / ACCEL_RDR + 1) * ACCEL_RDR;
 
                 // Actually larger than total powers size because of +5 in numrs
-                total_powers_size_without_batchsize += (size_t)shis[ii][jj - 1].numkern * (current_numrs + 5)  * sizeof(float);
+                //total_powers_size_without_batchsize += (size_t)shis[ii][jj - 1].numkern * (current_numrs + 5)  * sizeof(float);
+
+                current_numrs_fixed = ((current_numrs + 31)/32) * 32;
+                total_powers_size_without_batchsize += (size_t)shis[ii][jj - 1].numkern * (current_numrs_fixed + 5)  * sizeof(float);
 
                 shi_kernels += (size_t)shis[ii][jj - 1].numkern * fftlen;
             }

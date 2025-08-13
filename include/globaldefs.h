@@ -16,6 +16,7 @@ typedef struct
     float *subharmonic_powers;
     int subharmonic_numzs;
     int subharmonic_numrs;
+    int subharmonic_numrs_fixed;
 } SubharmonicMap;
 
 typedef struct

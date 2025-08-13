@@ -1092,6 +1092,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                             } */
                             subharmonics_add_host[kk * current_batch_size + i].harm_fract = kk;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numrs = subharmonics_batch[i].numrs;
+                            subharmonics_add_host[kk * current_batch_size + i].subharmonic_numrs_fixed = subharmonics_batch[i].numrs_fixed;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numzs = subharmonics_batch[i].numzs;
                             //subharmonics_add_host[kk * current_batch_size + i].subharmonic_numws = subharmonics_batch[i].numws;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_powers = subharmonics_batch[i].powers;

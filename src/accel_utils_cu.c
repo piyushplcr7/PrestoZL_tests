@@ -1152,12 +1152,14 @@ size_t subharm_fderivs_vol_cu_batch(
     {
         ffdotpows_cu *ffdot = &ffdot_array[b];
         ffdot->powers = &powers_dev_batch[idx];
+
+        ffdot->numrs_fixed = (ffdot->numrs + 31) / 32 * 32; // round up to next multiple of 32
         /* if (harmnum == 1 && numharm == 2) {
             printf("b: %d, powersize: %ld\n", b, ffdot->numws * ffdot->numzs * ffdot->numrs);
         } */
         //ffdot->powers_size = ffdot->numws * ffdot->numzs * ffdot->numrs;
         idx_array[b] = idx;
-        idx += ffdot->numws * ffdot->numzs * ffdot->numrs;
+        idx += ffdot->numws * ffdot->numzs * ffdot->numrs_fixed;
     }
 
     // Make GPU wait for pdata copy to be finished before running the kernels

@@ -775,6 +775,7 @@
 	 int stages,
 	 int current_batch_size,
 	 long long fundamental_size,
+	 long long fundamental_size_fixed,
 	 SearchValue *search_results,
 	 unsigned long long int *search_nums,
 	 long long pre_size,
@@ -786,12 +787,16 @@
 	 int ii = blockIdx.x % fundamental_numws;
 	 int jj = blockIdx.y;
 	 int kk = blockIdx.z * blockDim.x + threadIdx.x;
+
+	 int fundamental_numrs_fixed = (fundamental_numrs + 31) / 32 * 32; 
  
 	 if (kk < fundamental_numrs && *too_large == 0)
 	 {
+		 // Indexing of the actual arrays uses the fixed size values!
+		 int fundamental_index_fixed = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs_fixed);
+		 float tmp = fundamental_powers_flat[f * fundamental_size_fixed + fundamental_index_fixed];
+		 
 		 int fundamental_index = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs);
-		 float tmp = fundamental_powers_flat[f * fundamental_size + fundamental_index];
- 
 		 int stage = 0;
 		 if (tmp > powcuts_device[stage])
 		 {
@@ -824,7 +829,7 @@
  
 				 int zind = subharmonic_zinds[jj];
 				 int rind = subharmonic_rinds[kk];
-				 int subharmonic_index = matrix_3d_index(wind, zind, rind, subh.subharmonic_numzs, subh.subharmonic_numrs);
+				 int subharmonic_index = matrix_3d_index(wind, zind, rind, subh.subharmonic_numzs, subh.subharmonic_numrs_fixed);
 				 tmp += subharmonic_powers_flat[subharmonic_index]; 
 			 }
 			 pre += harmtosum;
@@ -869,6 +874,7 @@
 	 dim3 gridDim(fundamental->numws * current_batch_size, fundamental->numzs, (fundamental->numrs + threads - 1) / threads);
  
 	 long long fundamental_size = fundamental->numws * fundamental->numzs * fundamental->numrs;
+	 long long fundamental_size_fixed = fundamental->numws * fundamental->numzs * fundamental->numrs_fixed;
  
 	 fuse_add_search_batch_kernel<<<gridDim, threads, 0, stream>>>(
 		 fundamental->numrs,
@@ -879,6 +885,7 @@
 		 stages,
 		 current_batch_size,
 		 fundamental_size,
+		 fundamental_size_fixed,
 		 search_results,
 		 search_nums,
 		 pre_size,
@@ -1245,6 +1252,7 @@
  {
 	 int b = blockIdx.x / ws_len;
 	 int rs_len = rs_len_array[b];
+	 int rs_len_fixed = (rs_len + 31) / 32 * 32; // Round up to the next multiple of 32
 	 int idx_array_b = idx_array[b];
 	 float* powers_b = &powers[idx_array[b]];
 	 
@@ -1271,7 +1279,8 @@
 		 power = fmaf(complexval.y, complexval.y, power);
 		 power = fmaf(power, norm, 0.0f);
 
-		 int index = matrix_3d_index(ii, jj, kk-offset, zs_len, rs_len);
+		 // int index = matrix_3d_index(ii, jj, kk-offset, zs_len, rs_len);
+		 int index = matrix_3d_index(ii, jj, kk-offset, zs_len, rs_len_fixed);
 
 		 powers_b[index] = power;
 	 }

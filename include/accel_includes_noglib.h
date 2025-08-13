@@ -69,6 +69,7 @@ typedef struct ffdotpows_cu
     int zlo;               /* Lowest Fourier f-dot present */
     int wlo;               /* Lowest Fourier f-dot-dot present */
     int numrs;             /* Number of Fourier freqs present */
+    int numrs_fixed;
     int numzs;             /* Number of Fourier f-dots present */
     int numws;             /* Number of Fourier f-dot-dots present */
     float *powers;         /* 3D Matrix of the powers */
