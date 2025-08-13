@@ -32,6 +32,7 @@
  #include "cuda_helper.h"
  #include <math.h>
  #include <nvtx3/nvToolsExt.h>
+ #include "globaldefs.h"
  
  __constant__ int subw_device[12006];
  __constant__ float powcuts_device[6];
@@ -42,26 +43,6 @@
 
  int cufftwisdomarraysize = 0;
  cufftwisdompair cufftwisdomarray[MAX_CUFFT_WISDOM_SIZE];
- 
- // Structures to store multiple subharmonics
- typedef struct
- {
-	 int harm_fract;
-	 int subharmonic_wlo;
-	 unsigned short *subharmonic_zinds;
-	 unsigned short *subharmonic_rinds;
-	 float *subharmonic_powers;
-	 int subharmonic_numzs;
-	 int subharmonic_numrs;
- } SubharmonicMap;
- 
- // Structures to store search results
- typedef struct
- {
-	 long long index;
-	 float pow;
-	 float sig;
- } SearchValue;
  
  extern "C" extern float ***gen_f3Darr_cu(long nhgts, long nrows, long ncols, cudaStream_t stream);
  
@@ -1001,8 +982,8 @@
  
  // Template with parameter N, where N denotes the amount of shared memory used in KB
  //template <int N>
- __global__ void pre_fft_kernel_batch_float4_modified(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
-	 int batch_size, int ws_len, int zs_len, int fftlen, int alpha, cudaTextureObject_t texObj)
+ __global__ void pre_fft_kernel_batch_float4_SHMEMC2(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
+	 int batch_size, int ws_len, int zs_len, int fftlen, int alpha)
  {
 	 // Index for the batch of size alpha
 	 int b = blockIdx.x / ws_len;
@@ -1114,8 +1095,8 @@
  }
 
   //template <int N>
- __global__ void pre_fft_kernel_batch_float4_modi5(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
-	 int batch_size, int ws_len, int zs_len, int fftlen, int alpha, cudaTextureObject_t texObj)
+ __global__ void pre_fft_kernel_batch_float4_SHMEMC1(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
+	 int batch_size, int ws_len, int zs_len, int fftlen, int alpha)
  {
 	 // Index for the batch of size alpha
 	 int b = blockIdx.x / ws_len;
@@ -1240,7 +1221,9 @@
 		 fcomplex *output = &full_tmpout[(jj * ws_len + ii) * fftlen]; */
 
 		 float2 *fdata_complex = (float2*) &full_tmpout_array[b * (fftlen * ws_len * zs_len) + (jj * ws_len + ii) * fftlen];
-		
+
+		 // The address must be 128B aligned for proper coalescing!! The arbitrary offset ruins that alignment
+		 // Would be okay if offset was a multiple of 16 because 16 float2 = 16 * 8 = 128 bytes
 		 float2 complexval = fdata_complex[kk+offset];
 		 // Turn the good parts of the result into powers and store
 		 // them in the output matrix
@@ -1251,11 +1234,70 @@
 		 power = fmaf(complexval.y, complexval.y, power);
 		 power = fmaf(power, norm, 0.0f);
 
+		 // fdata[kk + offset] maps to power[kk],  // int index = ((ii * zs_len + jj) * rs_len + kk);
 		 int index = matrix_3d_index(ii, jj, kk, zs_len, rs_len);
 
 		 powers_b[index] = power;
 	 }
  }
+
+  __global__ void after_fft_kernel_batch_modified(float *powers, fcomplex *full_tmpout_array, int offset, float norm, int ws_len, int zs_len, int *rs_len_array, int fftlen, int *idx_array, int max_rs_len_plus_offset)
+ {
+	 int b = blockIdx.x / ws_len;
+	 int rs_len = rs_len_array[b];
+	 int idx_array_b = idx_array[b];
+	 float* powers_b = &powers[idx_array[b]];
+	 
+	 int ii = blockIdx.x % ws_len;
+	 int linear_index = blockIdx.y * blockDim.x + threadIdx.x;
+	 int jj = linear_index / (max_rs_len_plus_offset);
+	 int kk = linear_index % (max_rs_len_plus_offset);
+ 
+ 
+	 if (jj < zs_len && kk < rs_len+offset && kk >= offset)
+	 {
+		 /* fcomplex *full_tmpout = &full_tmpout_array[b * (fftlen * ws_len * zs_len)];
+		 fcomplex *output = &full_tmpout[(jj * ws_len + ii) * fftlen]; */
+
+		 float2 *fdata_complex = (float2*) &full_tmpout_array[b * (fftlen * ws_len * zs_len) + (jj * ws_len + ii) * fftlen];
+
+		 float2 complexval = fdata_complex[kk];
+		 // Turn the good parts of the result into powers and store
+		 // them in the output matrix
+		 //float *fdata = (float *)fdata_complex;
+		 //const int ind = 2 * (kk + offset);
+		 
+		 float power = fmaf(complexval.x, complexval.x, 0.0f);
+		 power = fmaf(complexval.y, complexval.y, power);
+		 power = fmaf(power, norm, 0.0f);
+
+		 int index = matrix_3d_index(ii, jj, kk-offset, zs_len, rs_len);
+
+		 powers_b[index] = power;
+	 }
+ }
+
+ /* void run_after_fft_kernel_batch(
+		float *powers,
+		fcomplex *full_tmpout_array,
+		int offset,
+		float norm,
+		int ws_len_global,
+		int zs_len_global,
+		int *rs_len_array,
+		int fftlen,
+		int *idx_array,
+		int max_rs_len,
+		cudaStream_t stream,
+		int binoffset)
+		{
+			const int offset = binoffset * ACCEL_NUMBETWEEN;
+			const float norm = 1.0 / (fftlen * fftlen);
+			int threads_after = 512;
+			dim3 blocks_after(ws_len_global * batch_size, (zs_len_global * max_rs_len + threads_after - 1) / threads_after, 1);
+		
+			after_fft_kernel_batch<<<blocks_after, threads_after, 0, stream>>>(ffdot_array[0].powers, full_tmpout_array, offset, norm, ws_len_global, zs_len_global, rs_len_array_device, fftlen, idx_array_device, max_rs_len);
+		} */
  
  // Define a comparison function object for comparing the index fields of two SearchValue structures
  struct CompareSearchValue
@@ -1285,7 +1327,218 @@
 
 	return 0;
  }
- 
+
+ __global__ void pre_fft_kernel_batch_float4_SKMF(fcomplex *pdata_array, fcomplex *full_tmpdat_array, fcomplex *fkern_gpu,
+	int batch_size, int ws_len, int zs_len, int fftlen, int alpha)
+{
+	// Index for the batch of size alpha
+	int b = blockIdx.x / ws_len;
+
+	int ii = blockIdx.x % ws_len;
+	int jj = blockIdx.y;
+	int kk = blockIdx.z * blockDim.x + threadIdx.x;
+
+	if (kk < fftlen/2) { 
+		// Compute the complex multiplication and write to global memory
+
+		// Load the kernel once
+		float4 *fkern = (float4 *)(&fkern_gpu[(ii * zs_len + jj) * fftlen]);
+		float4 k = fkern[kk];
+
+		int calc_index_dev_val = calc_index_dev(ii, jj, ws_len, zs_len, fftlen);
+		int fftlen_ws_len_zs_len = fftlen * ws_len * zs_len;
+		
+		// Loop over the FFTs
+		for (int fftrow = 0 ; fftrow < alpha ; ++fftrow) {
+			float4 *pdata = (float4 *)(&pdata_array[(alpha * b + fftrow) * fftlen]);
+			float4 p = pdata[kk];		
+
+			float4 *fdata = (float4 *)(&full_tmpdat_array[(alpha * b + fftrow) * (fftlen_ws_len_zs_len) 
+														+ calc_index_dev_val]);
+
+			float2 res1;
+			res1.x = fmaf(p.y, k.y, 0.0f);
+			res1.x = fmaf(p.x, k.x, res1.x);     // real: p.x * k.x + p.y * k.y
+
+			res1.y = fmaf(-p.x, k.y, 0.0f);
+			res1.y = fmaf(p.y, k.x, res1.y);    // imag: p.y * k.x - p.x * k.y
+
+			float2 res2;
+			res2.x = fmaf(p.w, k.w, 0.0f);
+			res2.x = fmaf(p.z, k.z, res2.x);
+
+			res2.y = fmaf(-p.z, k.w, 0.0f);
+			res2.y = fmaf(p.w, k.z, res2.y);
+			
+			// Store results into fdata
+			fdata[kk] = make_float4(res1.x, res1.y, res2.x, res2.y);	
+		}
+	}
+}
+
+ void run_default_pre_fft_kernel(
+    fcomplex *pdata_array,
+    fcomplex *full_tmpdat_array,
+    fcomplex *fkern,
+    int batch_size,
+    int ws_len_global,
+    int zs_len_global,
+    int fftlen,
+    cudaStream_t stream)
+{
+	int threads_pre = 512;
+	dim3 blocks_pre(batch_size * ws_len_global, zs_len_global, (fftlen / 2 + threads_pre - 1) / threads_pre);
+
+	pre_fft_kernel_batch_float4<<<blocks_pre, threads_pre, 0, stream>>>(
+			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen);
+}
+
+ void run_pre_fft_kernel(
+		 fcomplex *pdata_array,
+		 fcomplex *full_tmpdat_array,
+		 fcomplex *fkern,
+		 int batch_size,
+		 int ws_len_global,
+		 int zs_len_global,
+		 int fftlen,
+		 cudaStream_t stream,
+		 int shared_mem_size,
+		 pre_fft_kernel_type kernel_type)
+ {
+	int threads_pre, alpha, beta;
+	 switch (kernel_type)
+	 {
+		// Shared mem kernel with 2 complex numbers per thread
+	 case PRE_FFT_KERNEL_SHARED_MEM_C2:
+		 threads_pre = 1024; // Equal to B in my notes
+
+     // alpha according to C = 2, ie each thread loads two complex no.s
+		 alpha = 32 * shared_mem_size / threads_pre;
+		 beta = (batch_size + alpha - 1) / alpha;
+
+		 if (batch_size % alpha == 0)
+		 {
+			 size_t shared_mem_size_bytes = shared_mem_size * 1024;
+
+			 cudaFuncSetAttribute(
+					 pre_fft_kernel_batch_float4_SHMEMC2,
+					 cudaFuncAttributeMaxDynamicSharedMemorySize,
+					 shared_mem_size_bytes);
+
+			 int zs_len_reduced = (zs_len_global + alpha - 1) / alpha;
+
+			 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen / 2 + threads_pre - 1) / threads_pre);
+			 pre_fft_kernel_batch_float4_SHMEMC2<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
+					 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha);
+		 }
+		 else
+		 {
+			run_default_pre_fft_kernel(
+				pdata_array,
+				full_tmpdat_array,
+				fkern,
+				batch_size,
+				ws_len_global,
+				zs_len_global,
+				fftlen,
+				stream
+			);
+		 }
+		 break;
+
+	 // Shared mem kernel with 1 complex number per thread
+	 case PRE_FFT_KERNEL_SHARED_MEM_C1:
+		 threads_pre = 1024; // Equal to B in my notes
+		 // alpha according to C = 1, ie each thread loads one complex no.
+		 alpha = 64 * shared_mem_size / threads_pre;
+		 beta = (batch_size + alpha - 1) / alpha;
+
+		 if (batch_size % alpha == 0)
+		 {
+			 size_t shared_mem_size_bytes = shared_mem_size * 1024;
+
+			 cudaFuncSetAttribute(
+					 pre_fft_kernel_batch_float4_SHMEMC1,
+					 cudaFuncAttributeMaxDynamicSharedMemorySize,
+					 shared_mem_size_bytes);
+
+			 int zs_len_reduced = (zs_len_global + alpha - 1) / alpha;
+
+			 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen + threads_pre - 1) / threads_pre);
+		   pre_fft_kernel_batch_float4_SHMEMC1<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
+			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha);
+		 }
+		 else
+		 {
+			 run_default_pre_fft_kernel(
+				pdata_array,
+				full_tmpdat_array,
+				fkern,
+				batch_size,
+				ws_len_global,
+				zs_len_global,
+				fftlen,
+				stream
+			);
+		 }
+		 break;
+
+
+	 case PRE_FFT_KERNEL_SKMF:
+		threads_pre = 512; // Equal to B in my notes
+		alpha = batch_size;
+		beta = (batch_size + alpha - 1)/ alpha;
+
+		if (batch_size % alpha == 0) {
+
+			dim3 blocks_pre(beta * ws_len_global, zs_len_global, (fftlen/2 + threads_pre - 1) / threads_pre);
+
+			pre_fft_kernel_batch_float4_SKMF<<<blocks_pre, threads_pre, 0, stream>>>(
+				pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha);
+		}
+		else {
+			run_default_pre_fft_kernel(
+				pdata_array,
+				full_tmpdat_array,
+				fkern,
+				batch_size,
+				ws_len_global,
+				zs_len_global,
+				fftlen,
+				stream
+			);
+		}
+		 break;
+
+		 
+	 case PRE_FFT_KERNEL_MKSF:
+		 // TODO: call MKSF kernel here
+		 break;
+
+	case PRE_FFT_KERNEL_DEFAULT:
+		 // Default: run original pre fft kernel here
+		 run_default_pre_fft_kernel(
+				pdata_array,
+				full_tmpdat_array,
+				fkern,
+				batch_size,
+				ws_len_global,
+				zs_len_global,
+				fftlen,
+				stream
+			);
+		 break;
+
+
+	 default:
+		 printf("Unknown pre_fft_kernel_type: %d\n", kernel_type);
+		 exit(EXIT_FAILURE);
+		 break;
+	 }
+
+	 CUDA_CHECK(cudaGetLastError());
+ }
+
  void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array,
 				   fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream,
 				   cudaTextureObject_t texObj)
@@ -1463,64 +1716,22 @@
 			CHECK_CUFFT_ERRORS(cufftSetStream(cu_plan, stream));
 		}
 	 }
-	 
-	 #define COMPLEXPERTHREAD2
- 
-	 // 2. run pre_fft_kernel
-	 int threads_pre = 1024; // Equal to B in my notes
 
-	 // Shared memory size in KB
-	 const int shared_mem_size = 16 * 4;
-	 
-	 #ifdef COMPLEXPERTHREAD1
-	 // alpha according to C = 1, ie each thread loads one complex no.
-	 int alpha = 64 * shared_mem_size/threads_pre;
-	 #else
-	 // alpha according to C = 2, ie each thread loads two complex no.s
-	 int alpha = 32 * shared_mem_size/threads_pre;
-	 #endif
+	// 2. run pre_fft_kernel
+	const int shared_mem_size = 16 * 4; // Shared memory size in KB
 
-	 int beta = (batch_size + alpha - 1)/ alpha;
- 
-	 if (batch_size % alpha == 0 && false) {
-		size_t shared_mem_size_bytes = shared_mem_size * 1024;
-
-		 cudaFuncSetAttribute(
-			 #ifdef COMPLEXPERTHREAD1
-			 pre_fft_kernel_batch_float4_modi5,
-			 #else
-			 pre_fft_kernel_batch_float4_modified,
-			 #endif
-			 cudaFuncAttributeMaxDynamicSharedMemorySize,
-			 shared_mem_size_bytes); 
-			 
-		 int zs_len_reduced = (zs_len_global + alpha - 1)/alpha;
-
-		 #ifdef COMPLEXPERTHREAD1
-		 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen + threads_pre - 1) / threads_pre);
-		 pre_fft_kernel_batch_float4_modi5<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
-			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
-		 #else
-		 dim3 blocks_pre(beta * ws_len_global, zs_len_reduced, (fftlen/2 + threads_pre - 1) / threads_pre);
-		 pre_fft_kernel_batch_float4_modified<<<blocks_pre, threads_pre, shared_mem_size_bytes, stream>>>(
-			pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen, alpha, texObj);
-		 #endif
-		 
-	 }
-	 else {
-		threads_pre = 512;
-		 dim3 blocks_pre(batch_size * ws_len_global, zs_len_global, (fftlen / 2 + threads_pre - 1) / threads_pre);
-	 
-		 //cudaEventRecord(start,stream);
-		 pre_fft_kernel_batch_float4<<<blocks_pre, threads_pre, 0, stream>>>(
-			 pdata_array, full_tmpdat_array, fkern, batch_size, ws_len_global, zs_len_global, fftlen);
-		 //cudaEventRecord(stop,stream);
-		 //cudaEventSynchronize(stop);
-		 //cudaEventElapsedTime(&elapsed, start, stop);
-		 //printf("Time for original pre fft kernel = %f (ms)\n", elapsed);
-	 }
- 
-	 CUDA_CHECK(cudaGetLastError());
+	run_pre_fft_kernel(
+		pdata_array,
+		full_tmpdat_array,
+		fkern,
+		batch_size,
+		ws_len_global,
+		zs_len_global,
+		fftlen,
+		stream,
+		shared_mem_size,
+		pre_fft_kernel_choice
+	);
 
 	 if (wisdom_batch_size) 
 	 {
@@ -1600,13 +1811,23 @@
 	 CUDA_CHECK(cudaMemcpyAsync(rs_len_array_device, rs_len_array, batch_size * sizeof(int), cudaMemcpyHostToDevice, stream));
 	 nvtxRangePop();
  
+	 
 	 // 5. run after_fft_kernel
-	 const int offset = binoffset * ACCEL_NUMBETWEEN;
+	 /* const int offset = binoffset * ACCEL_NUMBETWEEN;
 	 const float norm = 1.0 / (fftlen * fftlen);
 	 int threads_after = 512;
 	 dim3 blocks_after(ws_len_global * batch_size, (zs_len_global * max_rs_len + threads_after - 1) / threads_after, 1);
  
-	 after_fft_kernel_batch<<<blocks_after, threads_after, 0, stream>>>(ffdot_array[0].powers, full_tmpout_array, offset, norm, ws_len_global, zs_len_global, rs_len_array_device, fftlen, idx_array_device, max_rs_len);
+	 after_fft_kernel_batch<<<blocks_after, threads_after, 0, stream>>>(ffdot_array[0].powers, full_tmpout_array, offset, norm, ws_len_global, zs_len_global, rs_len_array_device, fftlen, idx_array_device, max_rs_len); */
+
+	 const int offset = binoffset * ACCEL_NUMBETWEEN;
+	 const float norm = 1.0 / (fftlen * fftlen);
+	 int threads_after = 512;
+	 int max_rs_len_plus_offset = max_rs_len + offset;
+
+	 dim3 blocks_after(ws_len_global * batch_size, (zs_len_global * max_rs_len_plus_offset + threads_after - 1) / threads_after, 1);
+ 
+	 after_fft_kernel_batch_modified<<<blocks_after, threads_after, 0, stream>>>(ffdot_array[0].powers, full_tmpout_array, offset, norm, ws_len_global, zs_len_global, rs_len_array_device, fftlen, idx_array_device, max_rs_len_plus_offset);
  
 	 CUDA_CHECK(cudaGetLastError());
  

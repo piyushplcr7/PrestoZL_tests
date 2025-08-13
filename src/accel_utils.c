@@ -41,8 +41,24 @@ void set_openmp_numthreads(int numthreads)
 size_t fkern_size_bytes = 0;
 //size_t total_powers_size = 0;
 size_t total_powers_size_without_batchsize = 0;
-size_t proper_batch_size_global = 0;
 float* powers_dev_batch_all;
+fcomplex* fkern_cpu_global;
+fcomplex* fkern_gpu_global;
+cudaStream_t h2d_memcpy_stream;
+cudaStream_t h2d_stream_pdata_dev_batch_all;
+int** offset_array_global;
+int** batched_fft_offset_array;
+int** fftlens;
+int** kernel_half_widths;
+fcomplex* batched_fft_thread_buffer;
+fftwf_plan** fft_plans;
+bool buffer_filled[NUM_BATCHES_IN_BUFFER];
+extern pthread_mutex_t* mutex;
+extern pthread_cond_t* cond;
+
+double* map_startr_array;
+double* map_lastr_array;
+size_t proper_batch_size_global = 0;
 
 #define NEAREST_INT(x) (int)(x < 0 ? x - 0.5 : x + 0.5)
 
@@ -169,7 +185,8 @@ static int calc_fftlen(int numharm, int harmnum, int max_zfull, int max_wfull, a
     return next_good_fftlen(bins_needed + end_effects);
 }
 
-static void init_kernel(int z, int w, int fftlen, kernel *kern, int max_num_pts_wdat, fftwf_plan plan_to_use, fftwf_plan inner_plan)
+static void init_kernel(int z, int w, int fftlen, kernel *kern, int max_num_pts_wdat, 
+    fftwf_plan plan_to_use, fftwf_plan inner_plan, fcomplex* kernel_ptr)
 {
     int numkern;
     fcomplex *tempkern;
@@ -181,7 +198,8 @@ static void init_kernel(int z, int w, int fftlen, kernel *kern, int max_num_pts_
     kern->kern_half_width = w_resp_halfwidth((double)z, (double)w, LOWACC);
     numkern = 2 * kern->numbetween * kern->kern_half_width;
     kern->numgoodbins = kern->fftlen - numkern;
-    kern->data = gen_cvect(kern->fftlen);
+    //kern->data = gen_cvect(kern->fftlen);
+    kern->data = kernel_ptr;
     tempkern = gen_w_response_modified(0.0, kern->numbetween, kern->z, kern->w, numkern, max_num_pts_wdat, inner_plan);
     place_complex_kernel(tempkern, numkern, kern->data, kern->fftlen);
     vect_free(tempkern);
@@ -244,7 +262,8 @@ void* allocate_pinned_memory(void* arg) {
     return NULL;
 } */
 
-static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subharminfo *shi, accelobs *obs, fftwf_plan plan_to_use)
+static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subharminfo *shi, 
+    accelobs *obs, fftwf_plan plan_to_use, fcomplex* shi_kernels)
 /* Note:  'zmax' is the overall maximum 'z' in the search while
           'wmax' is the overall maximum 'w' in the search       */
 {
@@ -282,16 +301,16 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
     pthread_create(&thread, NULL, allocate_pinned_memory, &args); */
 
     // Get the maximum w_resp_halfwidth for this subharmonic
-    int max_w_resp_halfwidth = 0;
+    int max_w_resp_halfwidth = w_resp_halfwidth((double)(-shi->zmax), (double)(-shi->wmax), LOWACC);
 
-    for (ii = 0; ii < shi->numkern_wdim; ii++)
+    /* for (ii = 0; ii < shi->numkern_wdim; ii++)
     {
         for (jj = 0; jj < shi->numkern_zdim; jj++)
         {
             int current_halfwidth = w_resp_halfwidth((double)(-shi->zmax + jj * ACCEL_DZ), (double)(-shi->wmax + ii * ACCEL_DW), LOWACC);
             max_w_resp_halfwidth = max_w_resp_halfwidth > current_halfwidth ? max_w_resp_halfwidth : current_halfwidth;
         }
-    }
+    } */
 
     // Find the position of the max w resp halfwidth
     /* for (ii = 0; ii < shi->numkern_wdim; ii++)
@@ -329,10 +348,11 @@ static void init_subharminfo(int numharm, int harmnum, int zmax, int wmax, subha
     {
         for (jj = 0; jj < shi->numkern_zdim; jj++)
         {
+            fcomplex* kernel_ptr = shi_kernels + fftlen * (ii * shi->numkern_zdim + jj);
             init_kernel(-shi->zmax + jj * ACCEL_DZ,
-                -shi->wmax + ii * ACCEL_DW, fftlen, &shi->kern[ii][jj], max_num_pts_wdat, plan_to_use, inner_plan);
-            }
+                -shi->wmax + ii * ACCEL_DW, fftlen, &shi->kern[ii][jj], max_num_pts_wdat, plan_to_use, inner_plan, kernel_ptr);
         }
+    }
         
     //free(dummy);
 
@@ -443,12 +463,312 @@ size_t calculateGPUMemUsage(subharminfo **subharminfs, accelobs obs, int batch_s
     return total_usage;
 }
 
+void normalize_data(fcomplex* data, int numdata, accelobs* obs) {
+    int ii;
+    float powargr, powargi;
+
+    // Normalize the Fourier amplitudes
+    if (obs->nph > 0.0)
+    {
+        //  Use freq 0 normalization if requested (i.e. photons)
+        double norm = 1.0 / sqrt(obs->nph);
+        for (ii = 0; ii < numdata; ii++)
+        {
+            data[ii].r *= norm;
+            data[ii].i *= norm;
+        }
+    }
+    else if (obs->norm_type == 0)
+    {
+        // default block median normalization
+        float *powers = gen_fvect(numdata);
+        for (ii = 0; ii < numdata; ii++)
+            powers[ii] = POWER(data[ii].r, data[ii].i);
+        double norm = 1.0 / sqrt(median(powers, numdata) / log(2.0));
+        vect_free(powers);
+        for (ii = 0; ii < numdata; ii++)
+        {
+            data[ii].r *= norm;
+            data[ii].i *= norm;
+        }
+    }
+    else
+    {
+        // optional running double-tophat local-power normalization
+        float *powers, *loc_powers;
+        powers = gen_fvect(numdata);
+        for (ii = 0; ii < numdata; ii++)
+        {
+            powers[ii] = POWER(data[ii].r, data[ii].i);
+        }
+        loc_powers = corr_loc_pow(powers, numdata);
+        for (ii = 0; ii < numdata; ii++)
+        {
+            float norm = invsqrtf(loc_powers[ii]);
+            data[ii].r *= norm;
+            data[ii].i *= norm;
+        }
+        vect_free(powers);
+        vect_free(loc_powers);
+    }
+}
+
+typedef struct
+{
+    int batch_size;
+    int last_batch_size;
+    int num_batches;
+    int numharmstages;
+    int corr_uselen;
+    accelobs obs;
+} fft_thread_args;
+
+/* void* batched_fft_thread_function(void* args_void_ptr) 
+{
+    // Input arguments for the thread
+    fft_thread_args args = *(fft_thread_args*)args_void_ptr;
+    accelobs obs = args.obs;
+    int num_batches_in_buffer = NUM_BATCHES_IN_BUFFER;
+    
+    // Allocating mutexes and conds
+    mutex = (pthread_mutex_t*) malloc(num_batches_in_buffer * sizeof(pthread_mutex_t));
+    cond = (pthread_cond_t*) malloc(num_batches_in_buffer * sizeof(pthread_cond_t));
+    for (int i = 0 ; i < num_batches_in_buffer ; ++i) 
+    {
+        mutex[i] = PTHREAD_MUTEX_INITIALIZER;
+        cond[i] = PTHREAD_COND_INITIALIZER;
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Computing important pre-requisites
+    int harmtosum;
+    int fft_length = obs->fftlen;
+
+    // Buffer size for no batchsize 1 and num batches in buffer 1
+    size_t single_buffer_size = obs->fft_length;
+
+    // Allocating memory and filling the value for fundamental
+    fftlens = (int**)malloc(obs->numharmstages * sizeof(int*));
+    fftlens[0] = (int*)malloc(2 * sizeof(int));
+    fftlens[0][0] = fft_length;
+
+    batched_fft_offset_array = (int**) malloc(obs->numharmstages * sizeof(int*));
+    batched_fft_offset_array[0] = (int*) malloc(1 * sizeof(int));
+    batched_fft_offset_array[0][0] = 0;
+    // Initial offset for the first subharmonic is the fundamental fft length
+    size_t batch_fft_offset = obs->fftlen * proper_batch_size_global;
+
+    fft_plans = (fftwf_plan**)malloc(obs->numharmstages * sizeof(fftwf_plan*));
+    fft_plans[0] = (fftwf_plan*)malloc(2 * sizeof(fftwf_plan));
+    fft_plans[0][0] = fftwf_plan_dft_1d(
+        fftlens[0][0],
+        NULL,
+        NULL,
+        FFTW_FORWARD,
+        FFTW_MEASURE
+    );
+
+    kernel_half_widths = (int**)malloc(obs->numharmstages * sizeof(int*));
+    kernel_half_widths[0] = (int*) malloc(2 * sizeof(int));
+    kernel_half_widths[0][0] = w_resp_halfwidth((double)calc_required_z(1, -(int)obs->zhi), 
+                                                (double)calc_required_w(1, -(int)obs->whi), LOWACC);
+   
+    // Allocating memory for subharmonics
+    for (int ii = 1; ii < obs->numharmstages; ii++)
+    {
+        int jj = 1 << ii;
+        fftlens[ii] = (int*) malloc(jj * sizeof(int));
+        fft_plans[ii] = (fftwf_plan*) malloc(jj * sizeof(fftwf_plan));
+        batched_fft_offset_array[ii] = (int*) malloc(jj * sizeof(int));
+        kernel_half_widths[ii] = (int*) malloc(jj * sizeof(int));
+    }
+
+    // Subharmonics
+    for (int ii = 1; ii < obs->numharmstages; ii++)
+    {
+        harmtosum = index_to_twon(ii);
+        // Going over odd harmonic indices
+        for (int jj = 1; jj < harmtosum; jj += 2)
+        {
+            fft_length = calc_fftlen(harmtosum, jj, (int)obs->zhi, (int)obs->whi, obs);
+            single_buffer_size += fft_length;
+            fftlens[ii][jj-1] = fft_length;
+
+            fft_plans[ii][jj-1] = fftwf_plan_dft_1d(
+                fft_length,
+                NULL,
+                NULL,
+                FFTW_FORWARD,
+                FFTW_MEASURE
+            );
+
+            double harm_fract = (double)jj / (double)harmtosum;
+
+            batched_fft_offset_array[ii][jj-1] = batch_fft_offset;
+
+            kernel_half_widths[ii][jj-1] = w_resp_halfwidth((double)calc_required_z(harm_fract, -(int)obs->zhi), 
+                                                (double)calc_required_w(harm_fract, -(int)obs->whi), LOWACC);
+
+            batch_fft_offset += fft_length * proper_batch_size_global;
+        }
+    }
+
+    // Creating the map efficiently
+    int max_map_size = (1 << obs.numharmstages);
+    int map_array_size = (int)ceil(( (double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR) ) - 1;
+    map_startr_array = malloc(map_array_size * sizeof(double));
+    map_lastr_array = malloc(map_array_size * sizeof(double));
+
+    double startr, lastr, nextr;
+    startr = obs.rlo;
+    lastr = 0;
+    nextr = 0;
+    int fundamental_cnt = 0;
+    while (startr + rstep < obs.highestbin)
+    {
+        nextr = startr + rstep;
+        lastr = nextr - ACCEL_DR;
+        map_startr_array[fundamental_cnt] = startr;
+        map_lastr_array[fundamental_cnt] = lastr;
+
+        startr = nextr;
+        fundamental_cnt++;
+    }
+
+    ///////////////////////////////////////////////////
+
+    // Allocating space for the buffer which can hold num_batches_in_buffer
+    CUDA_CHECK(cudaMallocHost((void**)&batched_fft_thread_buffer, 
+        proper_batch_size_global* num_batches_in_buffer * single_buffer_size * sizeof(fcomplex)));
+
+    // Initializing buffer_filled array
+    for (int i = 0 ; i < NUM_BATCHES_IN_BUFFER ; ++i) {
+        buffer_filled[i] = false;
+    }
+
+    // Going over batches
+    for (int batch_id_outer = 0 ; batch_id_outer < fundamental_cnt ; batch_id_outer += proper_batch_size_global) 
+    {
+        int current_batch_size = proper_batch_size_global < batch_size - batch_id_outer ? proper_batch_size_global : batch_size - batch_id_outer;
+        int buffer_idx = batch_id_outer%num_batches_in_buffer;
+        fcomplex* pdata_batch = batched_fft_thread_buffer + buffer_idx * proper_batch_size_global * single_buffer_size;
+
+        // If buffer filled, wait until it is not filled and fill it again
+        pthread_mutex_lock(&mutex[buffer_idx]);
+        while (buffer_filled[buffer_idx]) 
+        {
+            pthread_cond_wait(&cond[buffer_idx], &mutex[buffer_idx]);
+        }
+        pthread_mutex_unlock(&mutex[buffer_idx]);
+
+        // Going over the fundamental and subharmonics
+        for (int stage = 0; stage < obs.numharmstages; stage++)
+        {
+            int harmtosum = 1 << stage;
+            for (int harm = 1; harm <= harmtosum; harm += 2)
+            {
+                double harm_fract = (double)harm/harmtosum;
+                int binoffset = kernel_half_widths[stage][harm-1];
+                int fftlen = fftlens[stage][harm-1];
+                int numdata = fftlen/ACCEL_NUMBETWEEN;
+
+                fcomplex* pdata_subharm = pdata_batch + batched_fft_offset_array[stage][harm-1];
+                // Loop inside the batch
+                for (int b = 0 ; b < current_batch_size ; ++b) 
+                {
+                    double drlo = calc_required_r(harm_fract, map_startr_array[batch_id_outer * proper_batch_size_global + b]);
+                    long long ffdot_rlo = (long long)floor(drlo);
+                    long long lobin = ffdot_rlo - binoffset;
+
+                    // Extract the data to do FFT
+                    fcomplex *data = get_fourier_amplitudes(lobin, numdata, obs);
+                    // Normalize data
+                    normalize_data(data, numdata, &obs);
+                    // Determine pdata position
+                    fcomplex* pdata = pdata_subharm + b * fftlen;
+                    // Spread the data
+                    spread_no_pad(data, fftlen / ACCEL_NUMBETWEEN, pdata, fftlen, ACCEL_NUMBETWEEN);
+                    // Do the FFT
+                    fftwf_execute_dft(fft_plans[stage][harm-1], (fftwf_complex*)pdata, (fftwf_complex*)pdata);
+                }
+
+                pthread_mutex_lock(&mutex[buffer_idx]);
+                // Buffer filled!
+                buffer_filled[buffer_idx] = true;
+                pthread_mutex_unlock(&mutex[buffer_idx]);
+
+            } // end harmonic numerator
+        } // end harmonic stage
+    }
+
+
+} */
+
 subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
 {
-    size_t kern_ram_use = 0;
-    int ii, jj, harmtosum, fftlen;
+    size_t kernel_ram_use = 0;
+    int harmtosum;
+    int fft_length, fftlen;
     subharminfo **shis;
+
+    // Fundamental fft length
+    fft_length = obs->fftlen;
     fftlen = obs->fftlen;
+
+    // Offset array for kernels at a given subharmonic in a continuous buffer
+    offset_array_global = (int **)malloc(obs->numharmstages * sizeof(int *));
+    for (int ii = 0; ii < obs->numharmstages; ii++)
+    {
+        int jj = 1 << ii;
+        offset_array_global[ii] = (int *)malloc(jj * sizeof(int));
+    }
+
+    // Manually setting the value for the fundamental
+    offset_array_global[0][0] = 0;
+    // Manually calculating values for the fundamental due to fft_length breaking pattern
+    int number_kernels_z = ( calc_required_z( 1, (int)obs->zhi) / ACCEL_DZ) * 2 + 1;
+    int number_kernels_w = ( calc_required_w( 1, (int)obs->whi) / ACCEL_DW) * 2 + 1;
+    int number_kernels = number_kernels_w * number_kernels_z;
+
+    // kernel_ram_use initially stores values in terms of no. of fcomplexes
+    kernel_ram_use += number_kernels * obs->fftlen;
+
+    CUDA_CHECK(cudaStreamCreate(&h2d_memcpy_stream));
+    CUDA_CHECK(cudaStreamCreate(&h2d_stream_pdata_dev_batch_all));
+    
+    // Subharmonics 
+    for (int ii = 1; ii < obs->numharmstages; ii++)
+    {
+        harmtosum = index_to_twon(ii);
+        // Going over odd harmonic indices
+        for (int jj = 1; jj < harmtosum; jj += 2)
+        {
+            // Equal to obs->fftlen for fraction 1?!
+            fft_length = calc_fftlen(harmtosum, jj, (int)obs->zhi, (int)obs->whi, obs);
+
+            double harm_fract = (double)jj / (double)harmtosum;
+
+            number_kernels_z = ( calc_required_z( harm_fract, (int)obs->zhi) / ACCEL_DZ) * 2 + 1;
+            number_kernels_w = ( calc_required_w( harm_fract, (int)obs->whi) / ACCEL_DW) * 2 + 1;
+            number_kernels = number_kernels_w * number_kernels_z;
+            offset_array_global[ii][jj-1] = kernel_ram_use;
+            
+            kernel_ram_use += number_kernels * fft_length; 
+        }
+    }
+
+    // Convert the size to bytes for allocation
+    kernel_ram_use *= sizeof(fcomplex);
+
+    // Allocate GPU mem for all kernels here once
+    CUDA_CHECK(cudaMallocAsync(&fkern_gpu_global, kernel_ram_use, h2d_memcpy_stream));
+
+    // One pinned buffer for kernels.
+    CUDA_CHECK(cudaMallocHost((void**)&fkern_cpu_global, kernel_ram_use));
+
+    fcomplex* shi_kernels = fkern_cpu_global;
+
+    ///////////////////////////////////////////////////////////////////////////////
 
     // Read wisdom
     read_wisdom();
@@ -469,33 +789,24 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     double fullrlo = obs->rlo;
     double fullrhi = fullrlo + obs->corr_uselen * ACCEL_DR - ACCEL_DR; 
 
-    // same as batch_size_max
-    int map_array_size = (int)(((double)obs->highestbin - obs->rlo) / ((double)obs->corr_uselen * ACCEL_DR)) + 1;
-    proper_batch_size_global = cmd->batchsize < map_array_size ? cmd->batchsize : map_array_size;
-    printf("cmd->batchsize = %d, proper_batch_size_global = %d\n", cmd->batchsize, proper_batch_size_global);
-
     shis = (subharminfo **)malloc(obs->numharmstages * sizeof(subharminfo *));
     /* Prep the fundamental (actually, the highest harmonic) */
     shis[0] = (subharminfo *)malloc(2 * sizeof(subharminfo));
-    init_subharminfo(1, 1, (int)obs->zhi, (int)obs->whi, &shis[0][0], obs, plan_to_use);
-    kern_ram_use += (size_t)shis[0][0].numkern * fftlen * sizeof(fcomplex); // in Bytes
+    init_subharminfo(1, 1, (int)obs->zhi, (int)obs->whi, &shis[0][0], obs, plan_to_use, shi_kernels);
 
     total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * obs->corr_uselen * sizeof(float);
-
-    //size_t fund_pow_size = (size_t)shis[0][0].numkern * obs->corr_uselen * sizeof(float) * proper_batch_size_global;
-    //printf("Total powers contribution (fund): %d numkern, %d numrs, %d batchsize, pow size %ld\n", shis[0][0].numkern, obs->corr_uselen, proper_batch_size_global, fund_pow_size);
-    //total_powers_size += fund_pow_size;
+    shi_kernels += (size_t)shis[0][0].numkern * obs->fftlen;
 
     /* Prep the sub-harmonics if needed */
     if (!obs->inmem)
     {
         // Going over harmonic stages
-        for (ii = 1; ii < obs->numharmstages; ii++)
+        for (int ii = 1; ii < obs->numharmstages; ii++)
         {
             harmtosum = index_to_twon(ii);
             shis[ii] = (subharminfo *)malloc(harmtosum * sizeof(subharminfo));
             // Going over odd harmonic indices
-            for (jj = 1; jj < harmtosum; jj += 2)
+            for (int jj = 1; jj < harmtosum; jj += 2)
             {
                 fftlen = calc_fftlen(harmtosum, jj, (int)obs->zhi, (int)obs->whi, obs);
                 
@@ -509,7 +820,7 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
                 );
 
                 init_subharminfo(harmtosum, jj, (int)obs->zhi,
-                                 (int)obs->whi, &shis[ii][jj - 1], obs, plan_to_use);
+                                 (int)obs->whi, &shis[ii][jj - 1], obs, plan_to_use, shi_kernels);
 
                 double harm_fract;
                 harm_fract = (double)jj / (double)harmtosum;
@@ -519,20 +830,23 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
                 if (current_numrs % ACCEL_RDR)
                     current_numrs = (current_numrs / ACCEL_RDR + 1) * ACCEL_RDR;
 
-                //size_t subharm_pow_size = (size_t)shis[ii][jj - 1].numkern * current_numrs  * sizeof(float) * proper_batch_size_global;
-                //printf("Total powers contribution (%d/%d): %d numkern, %d numrs, %d batchsize,  powers size %ld\n", 
-                //    jj, harmtosum, shis[ii][jj - 1].numkern, current_numrs, proper_batch_size_global, subharm_pow_size);
-
                 // Actually larger than total powers size because of +5 in numrs
-                //total_powers_size += (size_t)shis[ii][jj - 1].numkern * (current_numrs + 5)  * sizeof(float) * proper_batch_size_global;
                 total_powers_size_without_batchsize += (size_t)shis[ii][jj - 1].numkern * (current_numrs + 5)  * sizeof(float);
 
-                kern_ram_use += (size_t)shis[ii][jj - 1].numkern * fftlen * sizeof(fcomplex); // in Bytes
+                shi_kernels += (size_t)shis[ii][jj - 1].numkern * fftlen;
             }
         }
     }
 
-    fkern_size_bytes = kern_ram_use;
+    // Allocate GPU memory for powers once here
+    CUDA_CHECK(cudaMallocAsync(&powers_dev_batch_all, 
+        total_powers_size_without_batchsize * proper_batch_size_global, h2d_stream_pdata_dev_batch_all));
+    
+    // Copy the kernels to GPU
+    CUDA_CHECK(cudaMemcpyAsync(fkern_gpu_global, fkern_cpu_global, 
+        kernel_ram_use, cudaMemcpyHostToDevice, h2d_memcpy_stream));
+
+    fkern_size_bytes = kernel_ram_use;
 
     // Check if the batch size works. Only works when the initial batchsize is smaller than the theoretical maximum. 
     // Code fails if the batch size is already too large -> proper_batch_size_global is just reduced by 1!
@@ -552,12 +866,6 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     size_t gpuUsage = calculateGPUMemUsage(shis, *obs, proper_batch_size_global, true);
     printf("GPU mem usage: %ld bytes or %f GB\n", gpuUsage, (double)gpuUsage/(1<<30));
 
-    // Allocate memory for powers once here! Change this to an async call
-    CUDA_CHECK(cudaMalloc(&powers_dev_batch_all, 
-        total_powers_size_without_batchsize * proper_batch_size_global));
-
-    //exit(1);
-
     return shis;
 }
 
@@ -565,13 +873,13 @@ static void free_subharminfo(subharminfo *shi)
 {
     int ii, jj;
 
-    for (ii = 0; ii < shi->numkern_wdim; ii++)
+    /* for (ii = 0; ii < shi->numkern_wdim; ii++)
     {
         for (jj = 0; jj < shi->numkern_zdim; jj++)
         {
             free_kernel(&shi->kern[ii][jj]);
         }
-    }
+    } */
     if (shi->numharm > 1)
     {
         free(shi->rinds);

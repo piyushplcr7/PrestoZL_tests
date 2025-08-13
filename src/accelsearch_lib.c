@@ -40,6 +40,7 @@
 #include <nvtx3/nvToolsExt.h>
 
 float* powers_dev_batch;
+enum pre_fft_kernel_type pre_fft_kernel_choice;
 
 // Use OpenMP
 #ifdef _OPENMP
@@ -391,6 +392,42 @@ void accelsearch_CPU1(int argc, char *argv[], subharminfo ***subharminfs_ptr, ac
     *obs_ptr = obs;
     *idata_ptr = idata;
 
+    // Preparing some variables for computing numrs required to compute powers size
+    double fullrlo = obs_ptr->rlo;
+    double fullrhi = fullrlo + obs_ptr->corr_uselen * ACCEL_DR - ACCEL_DR; 
+
+    // same as batch_size_max
+    int map_array_size = (int)(((double)obs_ptr->highestbin - obs_ptr->rlo) / ((double)obs_ptr->corr_uselen * ACCEL_DR)) + 1;
+    proper_batch_size_global = cmd->batchsize < map_array_size ? cmd->batchsize : map_array_size;
+    printf("cmd->batchsize = %d, proper_batch_size_global = %d\n", cmd->batchsize, proper_batch_size_global);
+
+    char *env_kernel = getenv("PRE_FFT_KERNEL_CHOICE");
+    if (env_kernel) {
+        if (strcmp(env_kernel, "SHARED_MEM_C2") == 0) {
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_SHARED_MEM_C2;
+            printf("Using PRE_FFT_KERNEL_SHARED_MEM_C2\n");
+        } else if (strcmp(env_kernel, "SHARED_MEM_C1") == 0) {
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_SHARED_MEM_C1;
+            printf("Using PRE_FFT_KERNEL_SHARED_MEM_C1\n");
+        } else if (strcmp(env_kernel, "SKMF") == 0) {
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_SKMF;
+            printf("Using PRE_FFT_KERNEL_SKMF\n");
+        } else if (strcmp(env_kernel, "MKSF") == 0) {
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_MKSF;
+            printf("Using PRE_FFT_KERNEL_MKSF\n");
+        } else if (strcmp(env_kernel, "DEFAULT") == 0) {
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_DEFAULT;
+            printf("Using PRE_FFT_KERNEL_DEFAULT\n");
+        } else {
+            fprintf(stderr, "Unknown PRE_FFT_KERNEL_CHOICE: %s, falling back to DEFAULT\n", env_kernel);
+            pre_fft_kernel_choice = PRE_FFT_KERNEL_DEFAULT;
+            printf("Using PRE_FFT_KERNEL_DEFAULT\n");
+        }
+    } else {
+        pre_fft_kernel_choice = PRE_FFT_KERNEL_DEFAULT; // default value
+        printf("Using PRE_FFT_KERNEL_DEFAULT\n");
+    }
+
     /* Zap birdies if requested and if in memory */
     if (cmd->zaplistP && !obs.mmap_file && obs.fft)
     {
@@ -510,8 +547,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     printf("Max threads (inside accelsearch_gpu): %d\n", max_threads);
     int ii, rstep;
     GSList *cands = NULL;
-    /* The step-size of blocks to walk through the input data */
-    rstep = obs.corr_uselen * ACCEL_DR;
     
     // Create cuda events for timing 
     cudaEvent_t start,stop;
@@ -609,18 +644,23 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     Since the length of each kern varies, it is necessary to record the offset*/
     int **offset_array;
 
-    offset_array = (int **)malloc(obs.numharmstages * sizeof(int *));
+    /* offset_array = (int **)malloc(obs.numharmstages * sizeof(int *));
     offset_array[0] = (int *)malloc(1 * sizeof(int));
     int jj;
     for (ii = 1; ii < obs.numharmstages; ii++)
     {
         jj = 1 << ii;
         offset_array[ii] = (int *)malloc(jj * sizeof(int));
-    }
+    } */
+
+    offset_array = offset_array_global;
 
     clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     cudaEventRecord(start,0);
-    fkern_gpu = fkern_host_to_dev(subharminfs, obs.numharmstages, offset_array);
+
+    //fcomplex* fkern_gpu_test = fkern_host_to_dev(subharminfs, obs.numharmstages, offset_array);
+    fkern_gpu = fkern_gpu_global;
+ 
     //fkern_gpu = fkern_host_to_dev_modified(subharminfs, obs.numharmstages, offset_array);
 
     cudaEventRecord(stop,0);
@@ -638,37 +678,37 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
     /* Start the main search loop */
     {
-        clock_gettime(CLOCK_MONOTONIC, &start_cpu);
+        /* clock_gettime(CLOCK_MONOTONIC, &start_cpu);
         int max_map_size = (1 << obs.numharmstages);
         MapEntry map[max_map_size];
-        double startr, lastr, nextr;
+        
 
         int map_array_size = (int)(((double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR)) + 1;
-        printf("map_array_size = %d\n", map_array_size);
+        printf("map_array_size = %d\n", map_array_size); */
 
-        for (int i = 0; i < max_map_size; i++)
+        /* for (int i = 0; i < max_map_size; i++)
         {
             map[i].value.startr_array = malloc(map_array_size * sizeof(double));
             map[i].value.lastr_array = malloc(map_array_size * sizeof(double));
             map[i].value.tuple_array = malloc(map_array_size * sizeof(StartrHarmTuple));
             map[i].value.count = 0;
-        }
+        } */
 
         /* Populate the saved F-Fdot plane at low freqs for in-memory
          * searches of harmonics that are below obs.rlo */
-        if (obs.inmem)
+        /* if (obs.inmem)
         {
             printf("inmem is not supported\n");
             exit(-1);
-        }
+        } */
 
         int stage, harmtosum, harm;
         int map_size = 0;
         // Start collecting batch data
-        startr = obs.rlo;
+        /* startr = obs.rlo;
         lastr = 0;
-        nextr = 0;
-        int fundamental_cnt = 0;
+        nextr = 0; */
+        /* int fundamental_cnt = 0;
         while (startr + rstep < obs.highestbin)
         {
             fundamental_cnt++;
@@ -696,7 +736,77 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
 
         printf("Creating map took: %.9f seconds\n", elapsed_cpu);
-        printf("map[0].value.count = %d\n", map[0].value.count);
+        printf("map[0].value.count = %d\n", map[0].value.count); */
+
+        int num_chunks = (int)ceil(( (double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR) ) - 1;
+        //printf("num_chunks = %d\n", num_chunks);
+        
+        double* test_startr_array = (double*)malloc(num_chunks * sizeof(double));
+        double* test_lastr_array = (double*)malloc(num_chunks * sizeof(double));
+
+        double startr, lastr, nextr;
+        startr = obs.rlo;
+        lastr = 0;
+        nextr = 0;
+        int test_idx = 0;
+        /* The step-size of blocks to walk through the input data */
+        rstep = obs.corr_uselen * ACCEL_DR;
+        while (startr + rstep < obs.highestbin)
+        {
+            nextr = startr + rstep;
+            lastr = nextr - ACCEL_DR;
+            test_startr_array[test_idx] = startr;
+            test_lastr_array[test_idx] = lastr;
+            test_idx++;
+            startr = nextr;
+        }
+
+        /* int match = 1;
+        for (int i = 0; i < map_size; ++i) {
+            for (int j = 0; j < num_chunks; ++j) {
+                if (fabs(map[i].value.startr_array[j] - test_startr_array[j]) > FLOAT_EPSILON) {
+                    printf("Mismatch at map[%d].value.startr_array[%d]: %f != %f\n", i, j, map[i].value.startr_array[j], test_startr_array[j]);
+                    match = 0;
+                    break;
+                }
+            }
+        }
+        if (match) {
+            printf("All map startr_array values match test_startr_array.\n");
+        } else {
+            printf("Some map startr_array values do not match test_startr_array.\n");
+        }
+
+        int match_lastr = 1;
+        for (int i = 0; i < map_size; ++i) {
+            for (int j = 0; j < num_chunks; ++j) {
+                if (fabs(map[i].value.lastr_array[j] - test_lastr_array[j]) > FLOAT_EPSILON) {
+                    printf("Mismatch at map[%d].value.lastr_array[%d]: %f != %f\n", i, j, map[i].value.lastr_array[j], test_lastr_array[j]);
+                    match_lastr = 0;
+                    break;
+                }
+            }
+        }
+        if (match_lastr) {
+            printf("All map lastr_array values match test_lastr_array.\n");
+        } else {
+            printf("Some map lastr_array values do not match test_lastr_array.\n");
+        } */
+
+        //exit(1);
+        
+        // Checking the map
+        /* for (int i = 0 ; i < map[0].value.count ; ++i) 
+        {
+            for (int j = 0 ; j < map_size ; ++j) 
+            {
+                printf("%f \t",map[j].value.startr_array[i]);
+
+            }
+            printf("\n");
+        } */
+
+        //exit(1);
 
         // Batch processing, map_size=15
         int batch_size_max = 0, ws_len_max = 0, zs_len_max = 0, fft_len_max = 0;
@@ -704,8 +814,9 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         ws_len_max = shii->numkern_wdim;
         zs_len_max = shii->numkern_zdim;
         fft_len_max = shii->kern[0][0].fftlen;
+        batch_size_max = num_chunks;
 
-        printf("Map size = %d\n", map_size);
+        /* printf("Map size = %d\n", map_size);
         for (int i = 0; i < map_size; i++)
         {
             //printf("harmonic %d/%d: %d X %d FFTs \n", map[i].key.harm, map[i].key.harmtosum, map[i].value.shi->numkern_wdim * map[i].value.shi->numkern_zdim, map[i].value.shi->kern[0][0].fftlen);
@@ -715,7 +826,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             batch_size_max = MAX(map[i].value.count, batch_size_max);
         }
         printf("batch_size_max = %d\n", batch_size_max);
-        printf("fft_len_max = %d, fundamental kernel size = %d\n", fft_len_max, shii->kern[0][0].fftlen);
+        printf("fft_len_max = %d, fundamental kernel size = %d\n", fft_len_max, shii->kern[0][0].fftlen); */
         //int proper_batch_size = MIN(cmd->batchsize, batch_size_max);
 
     /*     //float** pinned_mem_pointers = (float**) malloc(sizeof(float*) * max_map_size);
@@ -855,12 +966,14 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         CUDA_CHECK(cudaEventCreate(&pdata_copy_finished));
         cudaStream_t pdata_stream;
 
+        ffdotpows_cu *subharmonics_batch = malloc(proper_batch_size * sizeof(ffdotpows_cu));
+                                
 
         /* Reset indices if needed and search for real */
         if (obs.numharmstages > 1)
         { /* Search the subharmonics */
             int tk = 0, num_expand = 0;
-            int batch_size = map[0].value.count;
+            int batch_size = num_chunks;
             int total_batch = (batch_size + proper_batch_size - 1) / proper_batch_size;
             long long single_batch_size = obs.numharmstages * proper_batch_size * fundamental_size;
             int current_batch = -1;
@@ -872,16 +985,18 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             long long total_search_num = 0;
             long long search_results_host_size = 0;
             //printf("batch_size = %d\n", batch_size);
+            CUDA_CHECK(cudaStreamSynchronize(h2d_memcpy_stream));
+            CUDA_CHECK(cudaStreamSynchronize(h2d_stream_pdata_dev_batch_all));
             for (int j = 0; j < batch_size; j += proper_batch_size)
             {
-                powers_len_total = 0;
+                //powers_len_total = 0;
                 current_batch++;
                 int current_batch_size = proper_batch_size < batch_size - j ? proper_batch_size : batch_size - j;
                 //zinds_all = rinds_all + obs.corr_uselen * current_batch_size;
                 //printf("j = %d; current batch size: %d, current batch no = %d\n", j, current_batch_size, current_batch);
                 ffdotpows_cu *fundamentals = malloc(current_batch_size * sizeof(ffdotpows_cu));
-                double *startr_array = map[0].value.startr_array;
-                double *lastr_array = map[0].value.lastr_array;
+                double *startr_array = test_startr_array + j;//map[0].value.startr_array;
+                double *lastr_array = test_lastr_array +j; //map[0].value.lastr_array;
 
                 powers_dev_batch = powers_dev_batch_all;
 
@@ -889,8 +1004,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     fundamentals,
                     1,
                     1,
-                    startr_array + j,
-                    lastr_array + j,
+                    startr_array,
+                    lastr_array,
                     &subharminfs[0][0],
                     &obs,
                     main_stream,
@@ -928,29 +1043,29 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         //subharm_inds_size += (size_t)(obs.corr_uselen * sizeof(unsigned short) * batch_size * 2);
                         //printf("current batch size: %d, harm fract = %d/%d\n", current_batch_size ,harm, harmtosum);
                         // prepare batch
-                        MapKey k = {harmtosum, harm};
+                        /* MapKey k = {harmtosum, harm};
                         MapEntry *map_entry = getMap(map, map_size, k);
                         if (map_entry == NULL)
                         {
                             fprintf(stderr, "map_entry should not be null\n");
                             exit(EXIT_FAILURE);
-                        }
+                        } */
 
-                        ffdotpows_cu *subharmonics_batch = malloc(batch_size * sizeof(ffdotpows_cu));
-                        subharminfo *shi_local = map_entry->value.shi;
+                        //subharminfo *shi_local = map_entry->value.shi;
+                        subharminfo *shi_local = &subharminfs[stage][harm - 1];
 
-                        double *sub_startr_array = map_entry[0].value.startr_array + j;
-                        double *sub_lastr_array = map_entry[0].value.lastr_array + j;
-                        int harmtosum_local = map_entry[0].key.harmtosum;
-                        int harm_local = map_entry[0].key.harm;
+                        double *sub_startr_array = test_startr_array + j; //map_entry[0].value.startr_array + j;
+                        double *sub_lastr_array = test_lastr_array + j; //map_entry[0].value.lastr_array + j;
+                        //int harmtosum_local = map_entry[0].key.harmtosum;
+                        //int harm_local = map_entry[0].key.harm;
 
                         zinds_all_master[kk] = rinds_all_master[kk] + obs.corr_uselen * current_batch_size;
                         size_t powers_len_subharm = subharm_fderivs_vol_cu_batch(
                             subharmonics_batch,
-                            harmtosum_local,
-                            harm_local,
-                            sub_startr_array,
-                            sub_lastr_array,
+                            harmtosum,
+                            harm,
+                            startr_array,
+                            lastr_array,
                             shi_local,
                             &obs,
                             main_stream,
@@ -985,6 +1100,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_wlo = subharmonics_batch[i].wlo;
                         }
                         kk++;
+                        
                     } // end loop odd fraction in a stage
                 } // end loop harmonic stages
 
@@ -1197,7 +1313,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     CUDA_CHECK(cudaFreeAsync(pdata_dev, sub_stream));
                     // clean cufftPlan
                     clear_cache();
-                    cudaFree(fkern_gpu);
+                    CUDA_CHECK(cudaFree(fkern_gpu));
                     CUDA_CHECK(cudaStreamDestroy(main_stream));
                     CUDA_CHECK(cudaStreamDestroy(sub_stream));
 
@@ -1206,9 +1322,10 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     /* for (int map_idx = 0 ; map_idx < map_size ; ++map_idx ) {
                         CUDA_CHECK(cudaFreeHost(map[map_idx].powers));
                     } */
-                    freeMap(map, &max_map_size);
+                    //freeMap(map, &max_map_size);
 
                     free(subharmonics_add_host);
+                    free(subharmonics_batch);
                     free(fundamental_rlos);
                     /* cudaFreeHost(subw_host);
                     cudaFreeHost(powcuts_host);
@@ -1298,6 +1415,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             CUDA_CHECK(cudaFreeHost(rinds_all));
             CUDA_CHECK(cudaFreeHost(pdata_all));
             CUDA_CHECK(cudaFreeAsync(powers_dev_batch_all, sub_stream));
+            free(subharmonics_batch);
 
             //CUDA_CHECK(cudaFreeHost(subharminfs[0][0].powers));
             // free pinnned powers arrays 
@@ -1365,7 +1483,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
             cands = insert_to_cands(fundamental_numrs, fundamental_numzs, fundamental_numws, fundamental_rlos, fundamental_zlo, fundamental_wlo, proper_batch_size, numindeps_host, cands, search_results_host, total_search_num, single_batch_size, obs.numharmstages, main_stream, sub_stream);
 
-            freeMap(map, &max_map_size);
+            //freeMap(map, &max_map_size);
             free(subharmonics_add_host);
             free(fundamental_rlos);
             //CUDA_CHECK(cudaFreeHost(subw_host));
@@ -1383,6 +1501,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         }
     }
     free_subharminfos(&obs, subharminfs);
+    CUDA_CHECK(cudaFreeHost(fkern_cpu_global));
     subharminfs = NULL;
     *cands_ptr = cands;
     return 0;

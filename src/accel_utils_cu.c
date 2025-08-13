@@ -638,6 +638,7 @@ fcomplex *fkern_host_to_dev(subharminfo **subharminfs, int numharmstages, int **
         }
     }
 
+    printf("INSIDE fkern_host_to_dev:  %ld\n", sizeof(fcomplex) * fkern_size);
     fkern_cpu = (fcomplex *)malloc(sizeof(fcomplex) * fkern_size);
 
     /* clock_gettime(CLOCK_MONOTONIC, &start_cpu);
@@ -1060,8 +1061,8 @@ size_t subharm_fderivs_vol_cu_batch(
     // Creating a texture object to handle the FFT data
     //struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
     
-    assert(((uintptr_t)pdata_dev % 16) == 0);
-    assert(((uintptr_t)fkern % 16) == 0);
+    //assert(((uintptr_t)pdata_dev % 16) == 0);
+    //assert(((uintptr_t)fkern % 16) == 0);
 
     // For float4
 /*     struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
@@ -1098,7 +1099,7 @@ size_t subharm_fderivs_vol_cu_batch(
     free(rinds);
     free(zinds);    
 
-    size_t powers_len = 0;
+    /* size_t powers_len = 0;
     for (int b = 0; b < batch_size; b++)
     {
         ffdotpows_cu *ffdot = &ffdot_array[b];
@@ -1107,7 +1108,8 @@ size_t subharm_fderivs_vol_cu_batch(
         // array. The difference is that they correspond to the same subharmonic for a different 
         // chunk of the data
         powers_len += ffdot->numws * ffdot->numzs * ffdot->numrs;
-    }
+    } */
+    //powers_len_total += powers_len;
 
     /* ffdotpows_cu *ffdot_temp = &ffdot_array[0];
     size_t manual_powers_len = batch_size * ffdot_temp->numws * ffdot_temp->numzs * ffdot_temp->numrs;
@@ -1125,7 +1127,6 @@ size_t subharm_fderivs_vol_cu_batch(
     /* printf("Inside subharm fderivs (%d/%d): numzsXws %d, numrs %d, powers_len = %d\n", 
         harmnum, numharm, ffdot_array[0].numws * ffdot_array[0].numzs, ffdot_array[0].numrs, powers_len * sizeof(float)); */
     //printf("Before alloc, powers_len = %ld\n", powers_len);
-    powers_len_total += powers_len;
 
     //printf("Usage before allocation in subharm_fderivs\n");
     //size_t freeMem = printGPUUsage();
@@ -1163,11 +1164,13 @@ size_t subharm_fderivs_vol_cu_batch(
     #ifdef PINNED_PDATA_ALL
     CUDA_CHECK(cudaStreamWaitEvent(stream, pdata_copy_finished, 0));
     #endif
+    
     do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream);
     //CUDA_CHECK(cudaFreeAsync(pdata_dev, stream));
     
     free(idx_array);
-    return powers_len;
+    //return powers_len;
+    return idx;
 }
 
 static accelcand *create_accelcand(float power, float sigma,

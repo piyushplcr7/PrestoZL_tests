@@ -19,10 +19,13 @@
 
 #include "accel.h"
 #include "time.h"
+#include "globaldefs.h"
+
+int max_threads;
 
 int main(int argc, char *argv[])
 {
-    int max_threads = omp_get_max_threads();
+    max_threads = omp_get_max_threads();
     printf("Max threads (likely from OMP_NUM_THREADS): %d\n", max_threads);
     struct timespec start, end;
     subharminfo **subharminfs;
