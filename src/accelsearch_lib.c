@@ -518,11 +518,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     double allocated_pinned_memory = 0;
     double bytes_in_GB = (double) (1 << 30);
 
-    /* int *subw_host = malloc(single_loop * fundamental_numws * sizeof(int *));
-    float *powcuts_host = (float *)malloc(obs.numharmstages * sizeof(float *));
-    int *numharms_host = (int *)malloc(obs.numharmstages * sizeof(int *));
-    double *numindeps_host = (double *)malloc(obs.numharmstages * sizeof(double *)); */
-
     // Allocating pinned memory for transfer to GPU
     // Can it be done in parallel?
     int *subw_host; 
@@ -586,25 +581,12 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     /*When saving different keys, store the starting address of kern.data in fkern_gpu.
     Since the length of each kern varies, it is necessary to record the offset*/
     int **offset_array;
-
-    /* offset_array = (int **)malloc(obs.numharmstages * sizeof(int *));
-    offset_array[0] = (int *)malloc(1 * sizeof(int));
-    int jj;
-    for (ii = 1; ii < obs.numharmstages; ii++)
-    {
-        jj = 1 << ii;
-        offset_array[ii] = (int *)malloc(jj * sizeof(int));
-    } */
-
     offset_array = offset_array_global;
 
     clock_gettime(CLOCK_MONOTONIC, &start_cpu);
     cudaEventRecord(start,0);
-
-    //fcomplex* fkern_gpu_test = fkern_host_to_dev(subharminfs, obs.numharmstages, offset_array);
     fkern_gpu = fkern_gpu_global;
- 
-    //fkern_gpu = fkern_host_to_dev_modified(subharminfs, obs.numharmstages, offset_array);
+
 
     cudaEventRecord(stop,0);
     cudaEventSynchronize(stop);
@@ -621,65 +603,9 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
     /* Start the main search loop */
     {
-        /* clock_gettime(CLOCK_MONOTONIC, &start_cpu);
-        int max_map_size = (1 << obs.numharmstages);
-        MapEntry map[max_map_size];
-        
-
-        int map_array_size = (int)(((double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR)) + 1;
-        printf("map_array_size = %d\n", map_array_size); */
-
-        /* for (int i = 0; i < max_map_size; i++)
-        {
-            map[i].value.startr_array = malloc(map_array_size * sizeof(double));
-            map[i].value.lastr_array = malloc(map_array_size * sizeof(double));
-            map[i].value.tuple_array = malloc(map_array_size * sizeof(StartrHarmTuple));
-            map[i].value.count = 0;
-        } */
-
-        /* Populate the saved F-Fdot plane at low freqs for in-memory
-         * searches of harmonics that are below obs.rlo */
-        /* if (obs.inmem)
-        {
-            printf("inmem is not supported\n");
-            exit(-1);
-        } */
 
         int stage, harmtosum, harm;
         int map_size = 0;
-        // Start collecting batch data
-        /* startr = obs.rlo;
-        lastr = 0;
-        nextr = 0; */
-        /* int fundamental_cnt = 0;
-        while (startr + rstep < obs.highestbin)
-        {
-            fundamental_cnt++;
-            nextr = startr + rstep;
-            lastr = nextr - ACCEL_DR;
-            if (obs.numharmstages > 1)
-            {
-                for (stage = 1; stage < obs.numharmstages; stage++)
-                {
-                    harmtosum = 1 << stage;
-                    for (harm = 1; harm < harmtosum; harm += 2)
-                    {
-                        subharminfo *shi = &subharminfs[stage][harm - 1];
-                        MapKey key = {harmtosum, harm};
-                        assert(map_size < max_map_size);
-                        insertOrUpdateMap(map, &map_size, key, startr, lastr, shi, harmtosum, harm, max_map_size);
-                    }
-                }
-            }
-            startr = nextr;
-        }
-
-        clock_gettime(CLOCK_MONOTONIC, &end_cpu);
-        elapsed_cpu = (end_cpu.tv_sec - start_cpu.tv_sec) +
-                        (end_cpu.tv_nsec - start_cpu.tv_nsec) / 1e9;
-
-        printf("Creating map took: %.9f seconds\n", elapsed_cpu);
-        printf("map[0].value.count = %d\n", map[0].value.count); */
 
         int num_chunks = (int)ceil(( (double)obs.highestbin - obs.rlo) / ((double)obs.corr_uselen * ACCEL_DR) ) - 1;
         //printf("num_chunks = %d\n", num_chunks);
@@ -704,53 +630,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
             startr = nextr;
         }
 
-        /* int match = 1;
-        for (int i = 0; i < map_size; ++i) {
-            for (int j = 0; j < num_chunks; ++j) {
-                if (fabs(map[i].value.startr_array[j] - test_startr_array[j]) > FLOAT_EPSILON) {
-                    printf("Mismatch at map[%d].value.startr_array[%d]: %f != %f\n", i, j, map[i].value.startr_array[j], test_startr_array[j]);
-                    match = 0;
-                    break;
-                }
-            }
-        }
-        if (match) {
-            printf("All map startr_array values match test_startr_array.\n");
-        } else {
-            printf("Some map startr_array values do not match test_startr_array.\n");
-        }
-
-        int match_lastr = 1;
-        for (int i = 0; i < map_size; ++i) {
-            for (int j = 0; j < num_chunks; ++j) {
-                if (fabs(map[i].value.lastr_array[j] - test_lastr_array[j]) > FLOAT_EPSILON) {
-                    printf("Mismatch at map[%d].value.lastr_array[%d]: %f != %f\n", i, j, map[i].value.lastr_array[j], test_lastr_array[j]);
-                    match_lastr = 0;
-                    break;
-                }
-            }
-        }
-        if (match_lastr) {
-            printf("All map lastr_array values match test_lastr_array.\n");
-        } else {
-            printf("Some map lastr_array values do not match test_lastr_array.\n");
-        } */
-
-        //exit(1);
-        
-        // Checking the map
-        /* for (int i = 0 ; i < map[0].value.count ; ++i) 
-        {
-            for (int j = 0 ; j < map_size ; ++j) 
-            {
-                printf("%f \t",map[j].value.startr_array[i]);
-
-            }
-            printf("\n");
-        } */
-
-        //exit(1);
-
         // Batch processing, map_size=15
         int batch_size_max = 0, ws_len_max = 0, zs_len_max = 0, fft_len_max = 0;
         subharminfo *shii = &subharminfs[0][0];
@@ -758,35 +637,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         zs_len_max = shii->numkern_zdim;
         fft_len_max = shii->kern[0][0].fftlen;
         batch_size_max = num_chunks;
-
-        /* printf("Map size = %d\n", map_size);
-        for (int i = 0; i < map_size; i++)
-        {
-            //printf("harmonic %d/%d: %d X %d FFTs \n", map[i].key.harm, map[i].key.harmtosum, map[i].value.shi->numkern_wdim * map[i].value.shi->numkern_zdim, map[i].value.shi->kern[0][0].fftlen);
-            fft_len_max = MAX(map[i].value.shi->kern[0][0].fftlen, fft_len_max);
-            zs_len_max = MAX(map[i].value.shi->numkern_zdim, zs_len_max);
-            ws_len_max = MAX(map[i].value.shi->numkern_wdim, ws_len_max);
-            batch_size_max = MAX(map[i].value.count, batch_size_max);
-        }
-        printf("batch_size_max = %d\n", batch_size_max);
-        printf("fft_len_max = %d, fundamental kernel size = %d\n", fft_len_max, shii->kern[0][0].fftlen); */
-        //int proper_batch_size = MIN(cmd->batchsize, batch_size_max);
-
-    /*     //float** pinned_mem_pointers = (float**) malloc(sizeof(float*) * max_map_size);
-
-        int map_idx = 0;
-        // Allocate all pinned memory to hold powers
-        for (stage = 1; stage < obs.numharmstages; stage++)
-        {
-            harmtosum = 1 << stage;
-            for (harm = 1; harm < harmtosum; harm += 2)
-            {
-                double harm_fract = (double)harm/(double)harmtosum;
-                MapKey k = {harmtosum, harm};
-                MapEntry *map_entry = getMap(map, map_size, k);
-                //map_entry->powers = map_entry->value.shi->powers;
-            }
-        } */
 
         size_t array_size = proper_batch_size * sizeof(fcomplex) * fft_len_max * ws_len_max * zs_len_max; // Maximum does not exceed batch_size_max
         // printf("batch_size_max:%d, fft_len_max:%d, zs_len_max:%d, ws_len_max:%d, proper_batch_size: %d, array_size: %.2fMB\n",
@@ -806,14 +656,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         //CUDA_CHECK(cudaStreamSynchronize(main_stream));
         printf("GPU Mem alloc size (full_tmpdat_array): %f GB\n", (double)array_size/(1<<30));
 
-        //printf("Full tmpdat array can hold: %d X %d FFTs\n", ws_len_max * zs_len_max, fft_len_max);
-        //printf("Fundamental subharmonic info: %d X %d FFTs\n", subharminfs[0][0].numkern, subharminfs[0][0].kern[0][0].fftlen);
-
-        //fcomplex* full_tmpdat_array_cpu = malloc(array_size);
-        //testcufftbatchsize(proper_batch_size, full_tmpdat_array, subharminfs, obs.numharmstages);
-        //exit(1);
-
-        //absorbout = printGPUUsage();
         SubharmonicMap *subharmonics_add;
         //printf("GPU Mem alloc size (subharmonics_add): %f GB\n", (1 << (obs.numharmstages - 1)) * (double)proper_batch_size * sizeof(SubharmonicMap)/(1<<30));
         CUDA_CHECK(cudaMallocAsync(&subharmonics_add, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), main_stream));
@@ -843,9 +685,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         nvtxRangePush("cuda malloc async search_results_base ");
         CUDA_CHECK(cudaMallocAsync(&search_results_base, search_results_size, sub_stream));
         nvtxRangePop();
-        //CUDA_CHECK(cudaStreamSynchronize(sub_stream));
-        //printf("Allocating search results base with size %f GB\n", (double)search_results_size/(1<<30));
-        //absorbout = printGPUUsage();
 
         //printf("GPU Mem alloc size (search_results): %ld\n", search_results_size);
         SearchValue *search_results = search_results_base;
@@ -865,10 +704,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         CUDA_CHECK(cudaMallocAsync(&pdata_dev, 
                                    (size_t)(sizeof(fcomplex) * fft_len_max * proper_batch_size), 
                                    main_stream));
-
-        //printf("Allocating pdata dev with size %f GB\n", (double)fft_len_max * proper_batch_size * sizeof(fcomplex)/(1<<30));
-        
-        //absorbout = printGPUUsage();
 
         // Allocating pinned memory for rinds and zinds that will be reused
         unsigned short* rinds_all;
@@ -904,8 +739,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         CUDA_CHECK(cudaMallocHost((void **)&pdata_all, pdata_all_size));        
         
         allocated_pinned_memory += pdata_all_size/bytes_in_GB;
-        //printf("Allocated pinned memory: %f GB\n", allocated_pinned_memory);
-        //printf("size of pdata_all = %f (KB)\n", (double)pdata_all_size/1024);
 
         // TODO: destroy event and stream!
         cudaEvent_t pdata_copy_finished;
@@ -986,24 +819,12 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     num_expand += harmtosum / 2;
                     for (harm = 1; harm < harmtosum; harm += 2)
                     {
-                        //subharm_inds_size += (size_t)(obs.corr_uselen * sizeof(unsigned short) * batch_size * 2);
-                        //printf("current batch size: %d, harm fract = %d/%d\n", current_batch_size ,harm, harmtosum);
-                        // prepare batch
-                        /* MapKey k = {harmtosum, harm};
-                        MapEntry *map_entry = getMap(map, map_size, k);
-                        if (map_entry == NULL)
-                        {
-                            fprintf(stderr, "map_entry should not be null\n");
-                            exit(EXIT_FAILURE);
-                        } */
 
                         //subharminfo *shi_local = map_entry->value.shi;
                         subharminfo *shi_local = &subharminfs[stage][harm - 1];
 
                         double *sub_startr_array = test_startr_array + j; //map_entry[0].value.startr_array + j;
                         double *sub_lastr_array = test_lastr_array + j; //map_entry[0].value.lastr_array + j;
-                        //int harmtosum_local = map_entry[0].key.harmtosum;
-                        //int harm_local = map_entry[0].key.harm;
 
                         zinds_all_master[kk] = rinds_all_master[kk] + corr_uselen_fixed * current_batch_size;
                         size_t powers_len_subharm = subharm_fderivs_vol_cu_batch(
@@ -1033,14 +854,10 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
                         for (int i = 0; i < current_batch_size; i++)
                         {
-                            /* if (harm == 7 && harmtosum == 8) {
-                                printf("kk = %d, subharmonics_batch no = %d, numrs = %d, numzs = %d\n", kk, i, subharmonics_batch[i].numrs, subharmonics_batch[i].numzs);
-                            } */
                             subharmonics_add_host[kk * current_batch_size + i].harm_fract = kk;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numrs = subharmonics_batch[i].numrs;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numrs_fixed = subharmonics_batch[i].numrs_fixed;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_numzs = subharmonics_batch[i].numzs;
-                            //subharmonics_add_host[kk * current_batch_size + i].subharmonic_numws = subharmonics_batch[i].numws;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_powers = subharmonics_batch[i].powers;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_rinds = subharmonics_batch[i].rinds;
                             subharmonics_add_host[kk * current_batch_size + i].subharmonic_zinds = subharmonics_batch[i].zinds;
@@ -1105,12 +922,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     CUDA_CHECK(cudaStreamDestroy(main_stream));
                     CUDA_CHECK(cudaStreamDestroy(sub_stream));
 
-                    //CUDA_CHECK(cudaFreeHost(subharminfs[0][0].powers));
-                    // free pinnned powers arrays 
-                    /* for (int map_idx = 0 ; map_idx < map_size ; ++map_idx ) {
-                        CUDA_CHECK(cudaFreeHost(map[map_idx].powers));
-                    } */
-                    //freeMap(map, &max_map_size);
 
                     free(subharmonics_add_host);
                     free(subharmonics_batch);

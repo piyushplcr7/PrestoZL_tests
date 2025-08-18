@@ -854,7 +854,7 @@
 	 }
  }
 
-  __global__ void fuse_add_search_batch_kernel_modified(
+ __global__ void fuse_add_search_batch_kernel_modified(
 	 int fundamental_numrs,
 	 int fundamental_numzs,
 	 int fundamental_numws,
@@ -886,7 +886,7 @@
 		 
 		 int fundamental_index = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs);
 		 int stage = 0;
-		 /* if (tmp > powcuts_device[stage])
+		 if (tmp > powcuts_device[stage])
 		 {
 			 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
 			 if (index >= max_searchnum)
@@ -898,7 +898,7 @@
 			 search_results[index].pow = tmp;
 			 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
 			 search_results[index].sig = sig;
-		 } */
+		 }
  
 		 int pre = 0;
 		 for (stage = 1; stage <= stages; stage++)
@@ -922,7 +922,7 @@
 			 }
 			 pre += harmtosum;
  
-			 /* if (tmp > powcuts_device[stage])
+			 if (tmp > powcuts_device[stage])
 			 {
 				 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
 				 if (index >= max_searchnum)
@@ -937,25 +937,8 @@
 					 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
 					 search_results[index].sig = sig;
 				 }
-			 } */
-		 }
-
-		 if (tmp > powcuts_device[stages])
-			 {
-				 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
-				 if (index >= max_searchnum)
-				 {
-					 *too_large = 1;
-					 return;
-				 }
-				 else
-				 {
-					 search_results[index].index = (long long)(pre_size) + (long long)(stages * fundamental_size + f * (stages + 1) * fundamental_size + fundamental_index);
-					 search_results[index].pow = tmp;
-					 float sig = candidate_sigma_cu(tmp, numharms_device[stages], numindeps_device[stages]);
-					 search_results[index].sig = sig;
-				 }
 			 }
+		 }
 	 }
  }
  
