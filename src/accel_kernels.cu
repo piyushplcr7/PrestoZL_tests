@@ -853,6 +853,111 @@
 		 }
 	 }
  }
+
+  __global__ void fuse_add_search_batch_kernel_modified(
+	 int fundamental_numrs,
+	 int fundamental_numzs,
+	 int fundamental_numws,
+	 float *fundamental_powers_flat,
+	 SubharmonicMap *subhmap,
+	 int stages,
+	 int current_batch_size,
+	 long long fundamental_size,
+	 long long fundamental_size_fixed,
+	 SearchValue *search_results,
+	 unsigned long long int *search_nums,
+	 long long pre_size,
+	 int proper_batch_size,
+	 int max_searchnum,
+	 int *too_large)
+ {
+	 int f = blockIdx.x / fundamental_numws;
+	 int ii = blockIdx.x % fundamental_numws;
+	 int jj = blockIdx.y;
+	 int kk = blockIdx.z * blockDim.x + threadIdx.x;
+
+	 int fundamental_numrs_fixed = (fundamental_numrs + 31) / 32 * 32; 
+ 
+	 if (kk < fundamental_numrs && *too_large == 0)
+	 {
+		 // Indexing of the actual arrays uses the fixed size values!
+		 int fundamental_index_fixed = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs_fixed);
+		 float tmp = fundamental_powers_flat[f * fundamental_size_fixed + fundamental_index_fixed];
+		 
+		 int fundamental_index = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs);
+		 int stage = 0;
+		 /* if (tmp > powcuts_device[stage])
+		 {
+			 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
+			 if (index >= max_searchnum)
+			 {
+				 *too_large = 1;
+				 return;
+			 }
+			 search_results[index].index = (long long)(pre_size) + (long long)(stage * fundamental_size + f * (stages + 1) * fundamental_size + fundamental_index);
+			 search_results[index].pow = tmp;
+			 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
+			 search_results[index].sig = sig;
+		 } */
+ 
+		 int pre = 0;
+		 for (stage = 1; stage <= stages; stage++)
+		 {
+			 int harmtosum = 1 << (stage - 1);
+			 for (int b = 0; b < harmtosum; b++)
+			 {
+				 SubharmonicMap subh = subhmap[(b + pre) * current_batch_size + f];
+				 int harm_fract = subh.harm_fract;
+				 float *subharmonic_powers_flat = subh.subharmonic_powers;
+				 int subharmonic_wlo = subh.subharmonic_wlo;
+				 unsigned short *subharmonic_zinds = subh.subharmonic_zinds;
+				 unsigned short *subharmonic_rinds = subh.subharmonic_rinds;
+				 int subw = subw_device[harm_fract * fundamental_numws + ii];
+				 int wind = ((subw - subharmonic_wlo) / ACCEL_DW);
+ 
+				 int zind = subharmonic_zinds[jj];
+				 int rind = subharmonic_rinds[kk];
+				 int subharmonic_index = matrix_3d_index(wind, zind, rind, subh.subharmonic_numzs, subh.subharmonic_numrs_fixed);
+				 tmp += subharmonic_powers_flat[subharmonic_index]; 
+			 }
+			 pre += harmtosum;
+ 
+			 /* if (tmp > powcuts_device[stage])
+			 {
+				 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
+				 if (index >= max_searchnum)
+				 {
+					 *too_large = 1;
+					 return;
+				 }
+				 else
+				 {
+					 search_results[index].index = (long long)(pre_size) + (long long)(stage * fundamental_size + f * (stages + 1) * fundamental_size + fundamental_index);
+					 search_results[index].pow = tmp;
+					 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
+					 search_results[index].sig = sig;
+				 }
+			 } */
+		 }
+
+		 if (tmp > powcuts_device[stages])
+			 {
+				 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
+				 if (index >= max_searchnum)
+				 {
+					 *too_large = 1;
+					 return;
+				 }
+				 else
+				 {
+					 search_results[index].index = (long long)(pre_size) + (long long)(stages * fundamental_size + f * (stages + 1) * fundamental_size + fundamental_index);
+					 search_results[index].pow = tmp;
+					 float sig = candidate_sigma_cu(tmp, numharms_device[stages], numindeps_device[stages]);
+					 search_results[index].sig = sig;
+				 }
+			 }
+	 }
+ }
  
  void fuse_add_search_batch(ffdotpows_cu *fundamentals,
 							SubharmonicMap *subhmap,

@@ -10,13 +10,25 @@
 #include <unistd.h>
 #include <errno.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 FILE *chkfopen(char *path, const char *mode);
+#ifdef __cplusplus
+}
+#endif
 /* Preform a file open with error checking.  */
 
 size_t chkfread(void *data, size_t type, size_t number, FILE * stream);
 /* Preform a file read with error checking.  */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 size_t chkfwrite(void *data, size_t type, size_t number, FILE * stream);
+#ifdef __cplusplus
+}
+#endif
 /* Preform a file write with error checking. */
 
 size_t chkfseek(FILE * stream, long offset, int whence);

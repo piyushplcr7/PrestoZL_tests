@@ -21,6 +21,7 @@
 #include "cuda_helper.h"
 #include <cuda_runtime.h>
 #include <stdbool.h>
+#include "cppdefs.h"
 
 // Use OpenMP
 #ifdef _OPENMP

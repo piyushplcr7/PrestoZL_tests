@@ -87,8 +87,18 @@ typedef struct s_Cmdline
 } Cmdline;
 
 extern char *Program;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern void usage(void);
+
+
 extern /*@shared*/ Cmdline *parseCmdline(int argc, char **argv);
+
+#ifdef __cplusplus
+}
+#endif
 
 extern void showOptionValues(void);
 

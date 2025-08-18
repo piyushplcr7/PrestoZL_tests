@@ -59,7 +59,14 @@ float ***gen_f3Darr(long nhgts, long nrows, long ncols);
 fcomplex ***gen_c3Darr(long nhgts, long nrows, long ncols);
 /* Generate a floating complex 3D array */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void vect_free(void *vect);
+
+#ifdef __cplusplus
+}
+#endif
 /* Free a generated vector */ 
 
 /*  Note:  To free memory allocated by these routines simply use  */

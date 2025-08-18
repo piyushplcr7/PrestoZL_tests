@@ -488,8 +488,14 @@ void get_derivs3d(fcomplex *data, long numdata, double r, \
   /*   'result' is a pointer to an rderivs structure that will  */
   /*       contain the results.                                 */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void calc_props(rderivs data, double r, double z, double w, \
 		fourierprops * result);
+#ifdef __cplusplus
+}
+#endif
   /* Return a fourierprops structure that contains the various  */
   /* properties of a signal described by Middleditch, Deich,    */ 
   /* and Kulkarni in _Isolated_Pulsars_, 1993, p372.            */  
@@ -1468,8 +1474,14 @@ void search_minifft(fcomplex *minifft, int numminifft,
 
 void print_rawbincand(rawbincand cand);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 int get_birdies(char *zapfilenm, double T, double avg_vel,
 		double **lobins, double **hibins);
+#ifdef __cplusplus
+}
+#endif
 /* Open, read, and close a text file containing frequencies (Hz)   */
 /* and widths (Hz) to ignore in a pulsar search.  The text file    */
 /* should have one frequency and width per line.  Lines beginning  */

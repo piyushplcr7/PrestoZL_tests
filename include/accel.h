@@ -83,6 +83,9 @@ typedef struct ffdotpows
 } ffdotpows;
 
 /* accel_utils.c */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd);
 void free_subharminfos(accelobs *obs, subharminfo **shis);
@@ -95,7 +98,10 @@ void optimize_accelcand(accelcand *cand, accelobs *obs);
 void output_fundamentals(fourierprops *props, GSList *list,
                          accelobs *obs, infodata *idata);
 void output_harmonics(GSList *list, accelobs *obs, infodata *idata);
+
+
 void free_accelcand(gpointer data, gpointer user_data);
+
 void print_accelcand(gpointer data, gpointer user_data);
 fcomplex *get_fourier_amplitudes(long long lobin, int numbins, accelobs *obs);
 ffdotpows *subharm_fderivs_vol(int numharm, int harmnum,
@@ -118,8 +124,13 @@ GSList *search_ffdotpows(ffdotpows *ffdot, int numharm,
                          accelobs *obs, GSList *cands);
 void free_accelobs(accelobs *obs);
 int compare(const void *a, const void *b);
+
+
 void accelsearch_CPU1(int argc, char *argv[], subharminfo ***subharminfs_ptr, accelobs *obs_ptr, infodata *idata_ptr, Cmdline **cmd_ptr);
 int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr, Cmdline *cmd);
 void accelsearch_CPU2(GSList **cands, accelobs *obs, infodata *idata, Cmdline *cmd);
+#ifdef __cplusplus
+}
+#endif
 
 #endif

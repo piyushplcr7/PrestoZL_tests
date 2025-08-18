@@ -1234,7 +1234,7 @@ GSList *insert_to_cands(
 
     long long fundamental_size = fundamental_numrs * fundamental_numzs * fundamental_numws;
 
-    if (search_num <= 0)
+    if (*search_num <= 0)
         return cands;
 
     // record last insert position
@@ -1242,7 +1242,7 @@ GSList *insert_to_cands(
     GSList *prev_list = NULL;
     double last_rr = 0;
 
-    for (int hitnum = 0; hitnum < search_num; hitnum++)
+    for (int hitnum = 0; hitnum < *search_num; hitnum++)
     {
         int current_batch = search_results[hitnum].index / single_batch_size;
         long long in_batch_id = search_results[hitnum].index % single_batch_size;

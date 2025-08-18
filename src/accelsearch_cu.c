@@ -20,6 +20,7 @@
 #include "accel.h"
 #include "time.h"
 #include "globaldefs.h"
+#include "cppdefs.h"
 
 int max_threads;
 
