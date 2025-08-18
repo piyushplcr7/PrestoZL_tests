@@ -735,28 +735,20 @@ size_t subharm_fderivs_vol_cu_batch(
     binoffset = shi->kern[0][0].kern_half_width;
 
     int max_threads = omp_get_max_threads();
-
-    // prepare pdata_dev
-    //fcomplex *pdata_dev;
     
     fftlen = shi->kern[0][0].fftlen;
     numdata = fftlen / ACCEL_NUMBETWEEN;
-    //CUDA_CHECK(cudaMallocAsync(&pdata_dev, (size_t)(sizeof(fcomplex) * fftlen * batch_size), stream));
+
+    int corr_uselen_fixed = (obs->corr_uselen + 31) / 32 * 32; // round up to the next multiple of 32
 
     if (!(numharm == 1 && harmnum == 1))
     {
         // Size 2X to hold both rinds and zinds
-        CUDA_CHECK(cudaMallocAsync(&(inds_array[inds_idx]), (size_t)(obs->corr_uselen * sizeof(unsigned short) * batch_size * 2), stream));
-        //CUDA_CHECK(cudaMemsetAsync(inds_array[inds_idx], 0, (size_t)(obs->corr_uselen * sizeof(unsigned short) * batch_size * 2), stream));
+        CUDA_CHECK(cudaMallocAsync(&(inds_array[inds_idx]), (size_t)(corr_uselen_fixed * sizeof(unsigned short) * batch_size * 2), stream));
     }
 
     // Create a common FFTW plan to be executed by all the threads
     fftwf_complex* dummy;
-    /* fftwf_complex *dummy = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftlen);
-    if (!dummy) {
-        fprintf(stderr, "Failed to allocate dummy buffer\n");
-        exit(1);
-    } */
 
     // Create a single shared FFTW plan (1D, forward transform, in-place)
     fftwf_plan shared_plan = fftwf_plan_dft_1d(
@@ -774,23 +766,7 @@ size_t subharm_fderivs_vol_cu_batch(
 
     bool writtenfftouts = false;
 
-    #define ALLOCATE_PDATA_ALL_ONCE
-
-    #define RZINDS_PINNED_MEM
-
-    //#define PINNED_PDATA_ALL
-
-    #ifdef ALLOCATE_PDATA_ALL_ONCE
-
-    #ifdef PINNED_PDATA_ALL
-    fcomplex* pdata_all = pdata_all_pinned;
-    #else
-    //fcomplex* pdata_all = gen_cvect(fftlen * batch_size);
-    // TEST:
     fcomplex* pdata_all =  pdata_all_pinned;
-    #endif
-
-    #endif
 
     unsigned short* inds_gpu = inds_array[inds_idx];
 
@@ -800,19 +776,12 @@ size_t subharm_fderivs_vol_cu_batch(
     CUDA_CHECK(cudaEventSynchronize(rzinds_copy_finished));
     nvtxRangePop();
 
-    #ifdef PINNED_PDATA_ALL
-    // Similarly wait for copy from pdata_all to be finished from the prev invocation
-    CUDA_CHECK(cudaEventSynchronize(pdata_copy_finished));
-    #endif
-
     // loop through each batch
     #pragma omp parallel for schedule(static)
     for (int b = 0; b < batch_size; b++)
     {
         double fullrlo = fullrlo_array[b];
         double fullrhi = fullrhi_array[b];
-
-        //printf("fullrlo for b = %d : %f\n", b, fullrlo);
 
         // ffdot is thread local
         ffdotpows_cu *ffdot = &ffdot_array[b];
@@ -828,22 +797,14 @@ size_t subharm_fderivs_vol_cu_batch(
         // Calculated for each chunk, but is it really necessary? can it be done just once?
         if (numharm > 1 && !obs->inmem)
         {
-            
-            // Allocate these arrays only if processing something other than fundamental!
-            #ifdef RZINDS_PINNED_MEM
             // Instead of allocating, use the supplied pinned memory
-            rinds[b] = rinds_all + b * obs->corr_uselen;
-            zinds[b] = zinds_all + b * obs->corr_uselen;
-            #else
-            rinds[b] = (unsigned short*) malloc(obs->corr_uselen * sizeof(unsigned short));
-            zinds[b] = (unsigned short*) malloc(obs->corr_uselen * sizeof(unsigned short));
-            #endif
+            rinds[b] = rinds_all + b * corr_uselen_fixed;
+            zinds[b] = zinds_all + b * corr_uselen_fixed;
 
             for (ii = 0; ii < obs->corr_uselen; ii++)
             {
                 double rr = fullrlo + ii * ACCEL_DR;
                 double subr = calc_required_r(harm_fract, rr);
-                //shi->rinds[ii] = index_from_r(subr, ffdot->rlo);
                 rinds[b][ii] = index_from_r(subr, ffdot->rlo);
             }
 
@@ -852,7 +813,6 @@ size_t subharm_fderivs_vol_cu_batch(
             {
                 double zz = obs->zlo + ii * ACCEL_DZ;
                 double subz = calc_required_z(harm_fract, zz);
-                //shi->zinds[ii] = index_from_z(subz, ffdot->zlo);
                 zinds[b][ii] = index_from_z(subz, ffdot->zlo);
             }
         }
@@ -875,22 +835,14 @@ size_t subharm_fderivs_vol_cu_batch(
         ffdot->numws = shi->numkern_wdim;
         if (numharm == 1 && harmnum == 1)
         {
-            //ffdot->rinds = shi->rinds;
-            //ffdot->zinds = shi->zinds;
-
             // Null pointers in the fundamental case! 
-            ffdot->rinds = rinds[b];
-            ffdot->zinds = zinds[b];
+            ffdot->rinds = NULL;
+            ffdot->zinds = NULL;
         }
         else
         {
-            // Deep copy function never called for fundamental!
-            //deep_copy_ffdotpows_cpu2cu(ffdot, shi, obs->corr_uselen, (inds_array[inds_idx]), b, batch_size, stream);
-
-            // Commented out to do some work here outside the function and copy the whole thing at once
-            //deep_copy_ffdotpows_cpu2cu_modified(ffdot, rinds, zinds, obs->corr_uselen, inds_array[inds_idx], b, batch_size, stream, numharm, harmnum);
-            ffdot->rinds = &inds_gpu[b * obs->corr_uselen];
-            ffdot->zinds = &inds_gpu[batch_size * obs->corr_uselen + b * obs->corr_uselen];
+            ffdot->rinds = &inds_gpu[b * corr_uselen_fixed];
+            ffdot->zinds = &inds_gpu[batch_size * corr_uselen_fixed + b * corr_uselen_fixed];
         }
 
 
@@ -951,11 +903,7 @@ size_t subharm_fderivs_vol_cu_batch(
         CUDA_CHECK(cudaEventSynchronize(pdata_copy_finished));
         nvtxRangePop();
         // Prep, spread, and FFT the data
-        #ifdef ALLOCATE_PDATA_ALL_ONCE
         fcomplex *pdata = &pdata_all[b*fftlen];
-        #else
-        fcomplex *pdata = gen_cvect(fftlen);
-        #endif
 
         spread_no_pad(data, fftlen / ACCEL_NUMBETWEEN, pdata, fftlen, ACCEL_NUMBETWEEN);
 
@@ -970,50 +918,9 @@ size_t subharm_fderivs_vol_cu_batch(
             fftwf_execute_dft(shared_plan, (fftwf_complex*)pdata, (fftwf_complex*)pdata);
         }
 
-        // Writing the FFT data for comparison
-        /* if (numharm == 8 && harmnum == 3 ) {
-            printf("Writing sgjkzz output of size %ld for batch item %d\n",fftlen,b);
-            char fftoutfilename[256];
-            if (max_threads == 1) {
-                sprintf(fftoutfilename, "COMPLEXFFT_%d",b);
-            }
-            else {
-                sprintf(fftoutfilename, "fftw_execute_dft_%d",b);
-            }
-            FILE* fftoutfile = fopen(fftoutfilename, "wb");
-
-            if (fftoutfile == NULL) {
-                printf("Error in writing file!\n");
-                exit(1);
-            }
-
-            size_t written = fwrite(pdata, sizeof(fcomplex), fftlen, fftoutfile);
-
-            if (written != fftlen) {
-                printf("Error in writing to file\n");
-                exit(1);
-            }
-            writtenfftouts = true;
-            fclose(fftoutfile);
-        } */
-
-        // copy pdata to pdata_dev, host to device
-        #ifndef ALLOCATE_PDATA_ALL_ONCE
-        nvtxRangePush("Copy pdata_dev chunk (H2D) ");
-        CUDA_CHECK(cudaMemcpyAsync(&pdata_dev[b * fftlen], pdata, (size_t)(sizeof(fcomplex) * fftlen), cudaMemcpyHostToDevice, stream));
-        nvtxRangePop();
-        vect_free(pdata);
-        #endif
-
-        //printf("shiboo\n");
         vect_free(data);
         
-        #ifndef RZINDS_PINNED_MEM
-        if (numharm > 1) {
-            free(rinds[b]);
-            free(zinds[b]);
-        }
-        #endif
+        
     }
     
     // Copy all indices at once as the buffer is continuous, holding both rinds and zinds
@@ -1021,157 +928,45 @@ size_t subharm_fderivs_vol_cu_batch(
     {
         nvtxRangePush("copying rzinds (H2D)");
         // The event recorded has to be on the same stream as 
-        CUDA_CHECK(cudaMemcpyAsync(inds_gpu, rinds_all, obs->corr_uselen * sizeof(unsigned short) * 2 * batch_size, cudaMemcpyHostToDevice, some_stream));
+        CUDA_CHECK(cudaMemcpyAsync(inds_gpu, rinds_all, corr_uselen_fixed * sizeof(unsigned short) * 2 * batch_size, cudaMemcpyHostToDevice, some_stream));
         nvtxRangePop();
         CUDA_CHECK(cudaEventRecord(rzinds_copy_finished, some_stream));
         //CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 
-    //printf("Copy all the pdata at once instead of doing it in a loop over b! \n");
     // Copy all the pdata at once instead of doing it in a loop over b!
-    #ifdef ALLOCATE_PDATA_ALL_ONCE
     char message[256];
     size_t pdata_all_size = (size_t) sizeof(fcomplex) * fftlen * batch_size;
     sprintf(message, "cpy pdata_all (H2D) %d/%d, size = %ld", harmnum, numharm, pdata_all_size);
     nvtxRangePush(message);
-    #ifdef PINNED_PDATA_ALL
-    CUDA_CHECK(cudaMemcpyAsync(pdata_dev, pdata_all, 
-        pdata_all_size, 
-        cudaMemcpyHostToDevice, pdata_stream));
-    CUDA_CHECK(cudaEventRecord(pdata_copy_finished, pdata_stream));
-    #else
     CUDA_CHECK(cudaMemcpyAsync(pdata_dev, pdata_all, 
         pdata_all_size, 
         cudaMemcpyHostToDevice, stream));
-    // TEST:
     CUDA_CHECK(cudaEventRecord(pdata_copy_finished, stream));
-    #endif
     nvtxRangePop();
-    
-    #ifndef PINNED_PDATA_ALL
-    // TEST:
-    //vect_free(pdata_all);
-    #endif
-
-    #endif
-    /* if (writtenfftouts) {
-        exit(1);
-    } */
-
-    // Creating a texture object to handle the FFT data
-    //struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
-    
-    //assert(((uintptr_t)pdata_dev % 16) == 0);
-    //assert(((uintptr_t)fkern % 16) == 0);
-
-    // For float4
-/*     struct cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
-    cudaArray_t cuArray;
-    // 2 * fftlen is the width, batch_size is the height
-    CUDA_CHECK(cudaMallocArray(&cuArray, &channelDesc, fftlen/2 , batch_size, cudaArrayDefault));
-    CUDA_CHECK(cudaMemcpy2DToArrayAsync(cuArray,
-        0, 0,
-        pdata_dev,
-        (fftlen / 2) * sizeof(float4),  // pitch in bytes
-        (fftlen / 2) * sizeof(float4),  // width in bytes
-        batch_size,
-        cudaMemcpyDeviceToDevice,
-        stream));
-
-    struct cudaResourceDesc resDesc;
-    memset(&resDesc, 0, sizeof(resDesc));
-
-    resDesc.resType = cudaResourceTypeArray;
-    resDesc.res.array.array = cuArray;
-
-    struct cudaTextureDesc texDesc;
-    memset(&texDesc, 0, sizeof(texDesc));
-
-    texDesc.addressMode[0] = cudaAddressModeClamp;
-    texDesc.addressMode[1] = cudaAddressModeClamp;
-    texDesc.filterMode     = cudaFilterModePoint;  // no interpolation
-    texDesc.readMode       = cudaReadModeElementType;
-    texDesc.normalizedCoords = 0;
-
-    cudaTextureObject_t texObj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL)); */
 
     free(rinds);
     free(zinds);    
 
-    /* size_t powers_len = 0;
-    for (int b = 0; b < batch_size; b++)
-    {
-        ffdotpows_cu *ffdot = &ffdot_array[b];
-        // The power sizes being summed should be the same
-        // They come from the harmonic fraction, which is the same for all the entries in the ffdot 
-        // array. The difference is that they correspond to the same subharmonic for a different 
-        // chunk of the data
-        powers_len += ffdot->numws * ffdot->numzs * ffdot->numrs;
-    } */
-    //powers_len_total += powers_len;
-
-    /* ffdotpows_cu *ffdot_temp = &ffdot_array[0];
-    size_t manual_powers_len = batch_size * ffdot_temp->numws * ffdot_temp->numzs * ffdot_temp->numrs;
-    if (manual_powers_len != powers_len) {
-        printf("Mismatch in powers_len computed manually\n");
-        printf("powers_len = %ld, manual_powers_len = %ld\n", powers_len, manual_powers_len);
-        for (int b = 0; b < batch_size; b++)
-        {
-            ffdotpows_cu *ffdot = &ffdot_array[b];
-            printf("b:%d => numws = %ld, numzs = %ld, numaaroos = %ld\n", b, ffdot->numws, ffdot->numzs, ffdot->numrs);
-        }
-        exit(1);
-    } */
-
-    /* printf("Inside subharm fderivs (%d/%d): numzsXws %d, numrs %d, powers_len = %d\n", 
-        harmnum, numharm, ffdot_array[0].numws * ffdot_array[0].numzs, ffdot_array[0].numrs, powers_len * sizeof(float)); */
-    //printf("Before alloc, powers_len = %ld\n", powers_len);
-
-    //printf("Usage before allocation in subharm_fderivs\n");
-    //size_t freeMem = printGPUUsage();
-
-   //float *powers_dev_batch;
-   //nvtxRangePush("malloc powers_dev_batch ");
-   //CUDA_CHECK(cudaMallocAsync(&powers_dev_batch, (size_t)(powers_len * sizeof(float)), stream));
-   //nvtxRangePop();
-   //CUDA_CHECK(cudaStreamSynchronize(stream));
-   
-   //printf("Usage after allocation of %f GB\n", (double)powers_len * sizeof(float) / (1<<30));
-   //freeMem = printGPUUsage();
-
-   //printf("\n");
-
     // TODO Free powers_dev_batch
     int idx = 0;
     int *idx_array = (int *)malloc(batch_size * sizeof(int));
-    /* if (harmnum == 7 && numharm == 8) {
-        printf("Inside subharm_fderivs_vol %d/%d\n", harmnum, numharm);
-    } */
     for (int b = 0; b < batch_size; b++)
     {
         ffdotpows_cu *ffdot = &ffdot_array[b];
         ffdot->powers = &powers_dev_batch[idx];
 
         ffdot->numrs_fixed = (ffdot->numrs + 31) / 32 * 32; // round up to next multiple of 32
-        /* if (harmnum == 1 && numharm == 2) {
-            printf("b: %d, powersize: %ld\n", b, ffdot->numws * ffdot->numzs * ffdot->numrs);
-        } */
         //ffdot->powers_size = ffdot->numws * ffdot->numzs * ffdot->numrs;
         idx_array[b] = idx;
         idx += ffdot->numws * ffdot->numzs * ffdot->numrs_fixed;
     }
 
-    // Make GPU wait for pdata copy to be finished before running the kernels
-    #ifdef PINNED_PDATA_ALL
-    CUDA_CHECK(cudaStreamWaitEvent(stream, pdata_copy_finished, 0));
-    #endif
     
     do_fft_batch(fftlen, binoffset, ffdot_array, shi, pdata_dev, idx_array, full_tmpdat_array, full_tmpout_array, batch_size, fkern, stream);
     //CUDA_CHECK(cudaFreeAsync(pdata_dev, stream));
     
     free(idx_array);
-    //return powers_len;
     return idx;
 }
 

@@ -935,7 +935,10 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         unsigned short* rinds_all_master[total_harmonic_fractions];
         unsigned short* zinds_all_master[total_harmonic_fractions];
 
-        size_t size_rinds_all = sizeof(unsigned short) * obs.corr_uselen * proper_batch_size * 2 * total_harmonic_fractions;
+        int corr_uselen_fixed = (obs.corr_uselen+31)/32 * 32; // Round up to the next multiple of 32
+
+        size_t size_rinds_all = sizeof(unsigned short) * corr_uselen_fixed * proper_batch_size * 2 * total_harmonic_fractions;
+
         CUDA_CHECK(cudaMallocHost((void **)&rinds_all, size_rinds_all));
         printf("size rinds_all = %f GB\n", size_rinds_all / bytes_in_GB);
         allocated_pinned_memory += size_rinds_all/bytes_in_GB;
@@ -943,7 +946,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
         cudaEvent_t rzinds_copy_finished_array[total_harmonic_fractions];
         for (int i = 0 ; i < total_harmonic_fractions ; ++i) {
             CUDA_CHECK(cudaEventCreate(&rzinds_copy_finished_array[i]));
-            rinds_all_master[i] = rinds_all + i * obs.corr_uselen * proper_batch_size * 2;
+            rinds_all_master[i] = rinds_all + i * corr_uselen_fixed * proper_batch_size * 2;
         }
 
         // TODO: destroy event and stream!
@@ -1059,7 +1062,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                         //int harmtosum_local = map_entry[0].key.harmtosum;
                         //int harm_local = map_entry[0].key.harm;
 
-                        zinds_all_master[kk] = rinds_all_master[kk] + obs.corr_uselen * current_batch_size;
+                        zinds_all_master[kk] = rinds_all_master[kk] + corr_uselen_fixed * current_batch_size;
                         size_t powers_len_subharm = subharm_fderivs_vol_cu_batch(
                             subharmonics_batch,
                             harmtosum,
