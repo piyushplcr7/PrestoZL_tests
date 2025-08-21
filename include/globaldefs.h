@@ -41,10 +41,13 @@ extern size_t powers_len_total;
 extern size_t fkern_size_bytes;
 //extern size_t total_powers_size;
 extern size_t total_powers_size_without_batchsize;
+extern size_t fundamental_powers_size_without_batchsize;
 extern size_t proper_batch_size_global;
 
 extern float* powers_dev_batch;
 extern float* powers_dev_batch_all;
+extern float* stage_powers_host;
+extern float* stage_powers_dev;
 
 extern pthread_t fftw_thread;
 extern int max_threads;

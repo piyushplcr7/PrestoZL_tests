@@ -496,6 +496,16 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
+    // Cuda events for timing the GPU stuff 
+    cudaEvent_t start_gpu, stop_gpu;
+    CUDA_CHECK(cudaEventCreate(&start_gpu));
+    CUDA_CHECK(cudaEventCreate(&stop_gpu));
+
+    // Cuda events for fsabkernel
+    cudaEvent_t start_fsab, stop_fsab;
+    CUDA_CHECK(cudaEventCreate(&start_fsab));
+    CUDA_CHECK(cudaEventCreate(&stop_fsab));
+
     // timing cpu
     struct timespec start_cpu, end_cpu;
     double timing = 0;
@@ -779,6 +789,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
 
                 powers_dev_batch = powers_dev_batch_all;
 
+                CUDA_CHECK(cudaEventRecord(start_gpu, main_stream));
+
                 size_t powers_len_fund = subharm_fderivs_vol_cu_batch(
                     fundamentals,
                     1,
@@ -868,6 +880,8 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     } // end loop odd fraction in a stage
                 } // end loop harmonic stages
 
+                CUDA_CHECK(cudaEventRecord(stop_gpu, main_stream));
+
                 nvtxRangePush("memcpy subharmonics_add (H2D)");
                 CUDA_CHECK(cudaMemcpyAsync(subharmonics_add, subharmonics_add_host, (1 << (obs.numharmstages - 1)) * proper_batch_size * sizeof(SubharmonicMap), cudaMemcpyHostToDevice, main_stream));
                 nvtxRangePop();
@@ -881,7 +895,7 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                 CUDA_CHECK(cudaStreamSynchronize(sub_stream));
                 nvtxRangePop();
 
-                //CUDA_CHECK(cudaEventRecord(fasb_start, main_stream));
+                CUDA_CHECK(cudaEventRecord(start_fsab, main_stream));
                 fuse_add_search_batch(fundamentals, 
                                       subharmonics_add, 
                                       (obs.numharmstages - 1), 
@@ -892,13 +906,29 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                                       (long long)(current_batch * single_batch_size), 
                                       proper_batch_size, 
                                       max_searchnum, 
-                                      d_too_large);
+                                      d_too_large,
+                                      stage_powers_dev);
+
+                CUDA_CHECK(cudaEventRecord(stop_fsab, main_stream));
 
                 // copy results to host
                 nvtxRangePush("main_stream synchronize");
                 CUDA_CHECK(cudaStreamSynchronize(main_stream));
                 nvtxRangePop();
+
+                float elapsed_gpu = 0.0f, elapsed_fsab = 0.0f;
+                CUDA_CHECK(cudaEventSynchronize(stop_gpu));
+                CUDA_CHECK(cudaEventElapsedTime(&elapsed_gpu, start_gpu, stop_gpu));
                 
+                CUDA_CHECK(cudaEventSynchronize(stop_fsab));
+                CUDA_CHECK(cudaEventElapsedTime(&elapsed_fsab, start_fsab, stop_fsab));
+
+                printf("Batch %d: GPU batch time (excluding fsab): %.3f ms, fsab kernel time: %.3f ms\n", current_batch, elapsed_gpu, elapsed_fsab);
+                
+                /* // Copy stages powers to the host
+                CUDA_CHECK(cudaMemcpyAsync(stage_powers_host, stage_powers_dev, 
+                                           fundamental_powers_size_without_batchsize * proper_batch_size_global * obs.numharmstages * sizeof(float), 
+                                           cudaMemcpyDeviceToHost, main_stream)); */
                 //printf("synchronized!\n");
                 cudaMemcpy(too_large, d_too_large, sizeof(int), cudaMemcpyDeviceToHost);
                     
@@ -926,10 +956,6 @@ int accelsearch_GPU(accelobs obs, subharminfo **subharminfs, GSList **cands_ptr,
                     free(subharmonics_add_host);
                     free(subharmonics_batch);
                     free(fundamental_rlos);
-                    /* cudaFreeHost(subw_host);
-                    cudaFreeHost(powcuts_host);
-                    cudaFreeHost(numharms_host);
-                    cudaFreeHost(numindeps_host); */
                     free(offset_array[0]);
                     for (ii = 1; ii < obs.numharmstages; ii++)
                     {

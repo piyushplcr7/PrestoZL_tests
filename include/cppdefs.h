@@ -1,15 +1,6 @@
 #ifndef CPPDEFS
 #define CPPDEFS
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-void free_subharmonic_cu_batch(SubharmonicMap *ffd_array, int batch_size, int num_expand,
-                               cudaStream_t sub_stream);
-
-void init_constant_device(int *subw_host, int subw_size, float *powcuts_host, int *numharms_host, double *numindeps_host, int numharmstages_size);
-
 void fuse_add_search_batch(ffdotpows_cu *fundamentals,
                            SubharmonicMap *subhmap,
                            int stages,
@@ -20,7 +11,16 @@ void fuse_add_search_batch(ffdotpows_cu *fundamentals,
                            long long pre_size,
                            int proper_batch_size,
                            int max_searchnum,
-                           int *too_large);
+                           int *too_large, float *stage_powers_device);
+                           
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void free_subharmonic_cu_batch(SubharmonicMap *ffd_array, int batch_size, int num_expand,
+                               cudaStream_t sub_stream);
+
+void init_constant_device(int *subw_host, int subw_size, float *powcuts_host, int *numharms_host, double *numindeps_host, int numharmstages_size);
       
 void free_ffdotpows_cu_batch(ffdotpows_cu *ffd_array, int batch_size,
                              cudaStream_t sub_stream);

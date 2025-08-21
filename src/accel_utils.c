@@ -42,9 +42,11 @@ void set_openmp_numthreads(int numthreads)
 size_t fkern_size_bytes = 0;
 //size_t total_powers_size = 0;
 size_t total_powers_size_without_batchsize = 0;
+size_t fundamental_powers_size_without_batchsize = 0;
 float* powers_dev_batch_all;
 fcomplex* fkern_cpu_global;
 fcomplex* fkern_gpu_global;
+float *stage_powers_host, *stage_powers_dev;
 cudaStream_t h2d_memcpy_stream;
 cudaStream_t h2d_stream_pdata_dev_batch_all;
 int** offset_array_global;
@@ -800,6 +802,11 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     //total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * obs->corr_uselen * sizeof(float);
     total_powers_size_without_batchsize += (size_t)shis[0][0].numkern * current_numrs_fixed * sizeof(float);
 
+    printf("Fundamental powers size: %f GB\n", 
+        (double)(total_powers_size_without_batchsize * proper_batch_size_global) / (1 << 30));
+
+    fundamental_powers_size_without_batchsize = total_powers_size_without_batchsize;
+
     shi_kernels += (size_t)shis[0][0].numkern * obs->fftlen;
 
     /* Prep the sub-harmonics if needed */
@@ -850,6 +857,15 @@ subharminfo **create_subharminfos(accelobs *obs, Cmdline *cmd)
     CUDA_CHECK(cudaMallocAsync(&powers_dev_batch_all, 
         total_powers_size_without_batchsize * proper_batch_size_global, h2d_stream_pdata_dev_batch_all));
     
+    // Allocate GPU memory for fundamental powers * (1 + harmonic stages) here. 
+    // TODO: Free this memory later!
+    /* CUDA_CHECK(cudaMallocAsync(&stage_powers_dev, 
+        fundamental_powers_size_without_batchsize * proper_batch_size_global * obs->numharmstages, h2d_stream_pdata_dev_batch_all));
+
+    CUDA_CHECK(cudaMallocHost((void**)&stage_powers_host, 
+        fundamental_powers_size_without_batchsize * proper_batch_size_global * obs->numharmstages));
+     */
+
     // Copy the kernels to GPU
     CUDA_CHECK(cudaMemcpyAsync(fkern_gpu_global, fkern_cpu_global, 
         kernel_ram_use, cudaMemcpyHostToDevice, h2d_memcpy_stream));

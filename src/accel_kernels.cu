@@ -48,7 +48,7 @@
  
  extern "C" extern void do_fft_batch(int fftlen, int binoffset, ffdotpows_cu *ffdot_array, subharminfo *shi, fcomplex *pdata_array, int *idx_array, fcomplex *full_tmpdat_array, fcomplex *full_tmpout_array, int batch_size, fcomplex *fkern, cudaStream_t stream, cudaTextureObject_t texObj);
  
- extern "C" extern void fuse_add_search_batch(ffdotpows_cu *fundamentals, SubharmonicMap *subhmap, int stages, int fundamental_num, cudaStream_t stream, SearchValue *search_results, unsigned long long int *search_nums, long long pre_size, int proper_batch_size, int max_searchnum, int *too_large);
+ //extern "C" extern void fuse_add_search_batch(ffdotpows_cu *fundamentals, SubharmonicMap *subhmap, int stages, int fundamental_num, cudaStream_t stream, SearchValue *search_results, unsigned long long int *search_nums, long long pre_size, int proper_batch_size, int max_searchnum, int *too_large);
  
  extern "C" extern kernel **gen_kernmatrix_cu(int numz, int numw);
  
@@ -869,7 +869,7 @@
 	 long long pre_size,
 	 int proper_batch_size,
 	 int max_searchnum,
-	 int *too_large)
+	 int *too_large, float* stage_powers_device)
  {
 	 int f = blockIdx.x / fundamental_numws;
 	 int ii = blockIdx.x % fundamental_numws;
@@ -882,11 +882,14 @@
 	 {
 		 // Indexing of the actual arrays uses the fixed size values!
 		 int fundamental_index_fixed = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs_fixed);
+		 float* stage_powers = stage_powers_device;
+
 		 float tmp = fundamental_powers_flat[f * fundamental_size_fixed + fundamental_index_fixed];
+		 stage_powers[f * fundamental_size_fixed + fundamental_index_fixed] = tmp;
 		 
 		 int fundamental_index = matrix_3d_index(ii, jj, kk, fundamental_numzs, fundamental_numrs);
 		 int stage = 0;
-		 if (tmp > powcuts_device[stage])
+		 /* if (tmp > powcuts_device[stage])
 		 {
 			 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
 			 if (index >= max_searchnum)
@@ -898,11 +901,13 @@
 			 search_results[index].pow = tmp;
 			 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
 			 search_results[index].sig = sig;
-		 }
+		 } */
  
 		 int pre = 0;
 		 for (stage = 1; stage <= stages; stage++)
 		 {
+			// Update stage_powers to the next stage
+			stage_powers += proper_batch_size * fundamental_size_fixed;
 			 int harmtosum = 1 << (stage - 1);
 			 for (int b = 0; b < harmtosum; b++)
 			 {
@@ -919,10 +924,11 @@
 				 int rind = subharmonic_rinds[kk];
 				 int subharmonic_index = matrix_3d_index(wind, zind, rind, subh.subharmonic_numzs, subh.subharmonic_numrs_fixed);
 				 tmp += subharmonic_powers_flat[subharmonic_index]; 
+				 stage_powers[f * fundamental_size_fixed + fundamental_index_fixed] = tmp;
 			 }
 			 pre += harmtosum;
  
-			 if (tmp > powcuts_device[stage])
+			 /* if (tmp > powcuts_device[stage])
 			 {
 				 unsigned long long int index = atomicAdd(&search_nums[0], 1ULL);
 				 if (index >= max_searchnum)
@@ -937,7 +943,7 @@
 					 float sig = candidate_sigma_cu(tmp, numharms_device[stage], numindeps_device[stage]);
 					 search_results[index].sig = sig;
 				 }
-			 }
+			 } */
 		 }
 	 }
  }
@@ -952,7 +958,7 @@
 							long long pre_size,
 							int proper_batch_size,
 							int max_searchnum,
-							int *too_large)
+							int *too_large, float* stage_powers_device)
  {
 	 int threads = 128;
 	 // fundamental points to the first block of powers in the current batch
@@ -964,7 +970,24 @@
 	 long long fundamental_size = fundamental->numws * fundamental->numzs * fundamental->numrs;
 	 long long fundamental_size_fixed = fundamental->numws * fundamental->numzs * fundamental->numrs_fixed;
  
-	 fuse_add_search_batch_kernel<<<gridDim, threads, 0, stream>>>(
+	 /* fuse_add_search_batch_kernel_modified<<<gridDim, threads, 0, stream>>>(
+		 fundamental->numrs,
+		 fundamental->numzs,
+		 fundamental->numws,
+		 fundamental->powers,
+		 subhmap,
+		 stages,
+		 current_batch_size,
+		 fundamental_size,
+		 fundamental_size_fixed,
+		 search_results,
+		 search_nums,
+		 pre_size,
+		 proper_batch_size,
+		 max_searchnum,
+		 too_large, stage_powers_device); */
+
+		 fuse_add_search_batch_kernel<<<gridDim, threads, 0, stream>>>(
 		 fundamental->numrs,
 		 fundamental->numzs,
 		 fundamental->numws,
